@@ -1,0 +1,95 @@
+1. Insert into cameras
+INSERT INTO cameras (
+    camera_name,
+    camera_type,
+    ip_address,
+    rtsp_url,
+    username,
+    resolution_width,
+    resolution_height,
+    target_fps,
+    video_codec,
+    location_description,
+    status,
+    rec_output_dir,
+    hls_output_dir
+) VALUES (
+    'Front Entrance',
+    'DOOR',
+    '172.210.140.91',
+    'rtsp://admin:bel123456@172.210.140.91:554/cam/realmonitor?channel=1&subtype=0',
+    'admin',
+    1920,
+    1080,
+    25,
+    'H.264',
+    'Main entrance door, coach front',
+    'ACTIVE',
+    '/storage/recordings',
+    '/storage/hls'
+);
+
+2. Check if ONVIF service is reachable at all (direct HTTP, not multicast):
+curl -s --connect-timeout 3 http://172.210.140.91/onvif/device_service
+
+3. Query the camera directly without relying on multicast discovery:
+curl -s -X POST "http://172.210.140.91/onvif/device_service" \
+  -H "Content-Type: application/soap+xml; charset=utf-8" \
+  -d '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body><GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>
+  </s:Body></s:Envelope>'
+
+4. WS-UsernameToken auth
+curl -s -X POST "http://172.210.140.91/onvif/device_service" \
+  -H "Content-Type: application/soap+xml; charset=utf-8" \
+  -d '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+       xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+       xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <s:Header>
+    <wsse:Security>
+      <wsse:UsernameToken>
+        <wsse:Username>admin</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">bel123456</wsse:Password>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    <GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>
+  </s:Body></s:Envelope>'
+
+5. Get device Information
+(base) [root@TEST-NODEs-CCp mnvr]# python3 -c "
+> import hashlib, base64, datetime, os, subprocess
+> nonce = os.urandom(16)
+> created = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+> password = 'bel123456'
+> digest = base64.b64encode(hashlib.sha1(nonce + created.encode() + password.encode()).digest()).decode()
+> nonce_b64 = base64.b64encode(nonce).decode()
+> body = f'''<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"
+> xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"
+> xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">
+> <s:Header><wsse:Security><wsse:UsernameToken>
+> <wsse:Username>mnvr</wsse:Username>
+> <wsse:Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">{digest}</wsse:Password>
+> <wsse:Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">{nonce_b64}</wsse:Nonce>
+> <wsu:Created>{created}</wsu:Created>
+> </wsse:UsernameToken></wsse:Security></s:Header>
+> <s:Body><GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body>
+> </s:Envelope>'''
+> r = subprocess.run(['curl','-s','-X','POST','http://172.210.140.91/onvif/device_service','-H','Content-Type: application/soap+xml; charset=utf-8','-d',body], capture_output=True, text=True)
+> print(r.stdout)"
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:sc="http://www.w3.org/2003/05/soap-encoding" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>CPPLUS</tds:Manufacturer><tds:Model>CP-UNC-TA41L5C-D-V3</tds:Model><tds:FirmwareVersion>2.800.00AT002.0.R, Build Date 2022-06-10</tds:FirmwareVersion><tds:SerialNumber>2405012674001654</tds:SerialNumber><tds:HardwareId>1.00</tds:HardwareId></tds:GetDeviceInformationResponse></s:Body></s:Envelope>
+(base) [root@TEST-NODEs-CCp mnvr]# 
+
+6. Get time mismatch
+(base) [root@TEST-NODEs-CCp mnvr]# echo "Server UTC: $(date -u)"
+Server UTC: Tue Apr 21 12:02:18 UTC 2026
+(base) [root@TEST-NODEs-CCp mnvr]# 
+(base) [root@TEST-NODEs-CCp mnvr]# # Get camera system date/time (this ONVIF call doesn't need auth)
+(base) [root@TEST-NODEs-CCp mnvr]# curl -s -X POST "http://172.210.140.91/onvif/device_service" \
+>   -H "Content-Type: application/soap+xml; charset=utf-8" \
+>   -d '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+>   <s:Body><GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body>
+>   </s:Envelope>'
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:sc="http://www.w3.org/2003/05/soap-encoding" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Header></s:Header><s:Body><tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:DateTimeType>Manual</tt:DateTimeType><tt:DaylightSavings>false</tt:DaylightSavings><tt:TimeZone><tt:TZ>GMT-00:00</tt:TZ></tt:TimeZone><tt:UTCDateTime><tt:Time><tt:Hour>17</tt:Hour><tt:Minute>32</tt:Minute><tt:Second>53</tt:Second></tt:Time><tt:Date><tt:Year>2026</tt:Year><tt:Month>4</tt:Month><tt:Day>21</tt:Day></tt:Date></tt:UTCDateTime></tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>(base) [root@TEST-NODEs-CCp mnvr]#
+

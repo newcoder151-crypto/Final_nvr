@@ -1,0 +1,21 @@
+[Unit]
+Description=mNVR – Mobile Network Video Recorder Daemon
+After=network.target local-fs.target postgresql.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mnvr
+ExecStartPre=/bin/mkdir -p /storage/recordings /storage/hls /var/log/mnvr /etc/mnvr
+ExecStart=/opt/mnvr/bin/mnvrd -c /etc/mnvr/mnvr.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

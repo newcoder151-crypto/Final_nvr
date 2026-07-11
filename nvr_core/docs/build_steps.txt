@@ -1,0 +1,35 @@
+make and run
+------------
+make clean && make
+./build/mnvrd -c /etc/mnvr/mnvr.conf -s /etc/mnvr/mnvr_schema.sql -d "host=172.210.120.118 dbname=mnvr user=mnvr password=mnvr"
+
+Database Commands
+-----------------
+1) Database Commands
+postgres=# DROP DATABASE IF EXISTS mnvr;
+DROP DATABASE
+postgres=# CREATE DATABASE mnvr OWNER mnvr;
+CREATE DATABASE
+postgres=# \l
+                                                     List of databases
+   Name    |  Owner   | Encoding | Locale Provider |   Collate   |    Ctype    | Locale | ICU Rules |   Access privileges
+-----------+----------+----------+-----------------+-------------+-------------+--------+-----------+-----------------------
+ mnvr      | mnvr     | UTF8     | libc            | en_US.UTF-8 | en_US.UTF-8 |        |           |
+ postgres  | postgres | UTF8     | libc            | en_US.UTF-8 | en_US.UTF-8 |        |           |
+ template0 | postgres | UTF8     | libc            | en_US.UTF-8 | en_US.UTF-8 |        |           | =c/postgres          +
+           |          |          |                 |             |             |        |           | postgres=CTc/postgres
+ template1 | postgres | UTF8     | libc            | en_US.UTF-8 | en_US.UTF-8 |        |           | =c/postgres          +
+           |          |          |                 |             |             |        |           | postgres=CTc/postgres
+(4 rows)
+
+
+2) View databases, tables
+\l        -- list databases
+\c mnvr   -- connect to mnvr
+\dt       -- list tables
+\d users  -- describe table
+\du       -- list users
+\q        -- quit
+
+3) Create Users
+CREATE USER admin WITH PASSWORD 'StrongPassword123' SUPERUSER;

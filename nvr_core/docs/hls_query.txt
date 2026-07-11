@@ -1,0 +1,29 @@
+-- See all recordings with their HLS status
+SELECT recording_id, camera_id, file_name,
+       start_timestamp, duration_seconds,
+       hls_conversion_status, hls_ts_file_path,
+       hls_segment_duration_sec, hls_converted_at
+FROM recordings
+ORDER BY start_timestamp DESC;
+
+-- Find recordings where HLS conversion failed
+SELECT recording_id, camera_id, file_path, start_timestamp
+FROM recordings
+WHERE hls_conversion_status = 'FAILED';
+
+-- Find recordings still pending HLS conversion (queued or in progress)
+SELECT recording_id, camera_id, file_path
+FROM recordings
+WHERE hls_conversion_status = 'PENDING'
+ORDER BY start_timestamp;
+
+-- Full segment-level HLS detail
+SELECT r.file_name, rs.segment_number,
+       rs.hls_ts_file_path, rs.hls_ts_duration_sec,
+       rs.hls_conversion_status
+FROM recordings r
+JOIN recording_segments rs ON r.recording_id = rs.recording_id
+ORDER BY r.start_timestamp DESC, rs.segment_number;
+
+# 3. Apply the schema manually (creates all 54 tables)
+psql -h 172.210.120.118 -U mnvr -d mnvr -f /etc/mnvr/mnvr_schema.sql

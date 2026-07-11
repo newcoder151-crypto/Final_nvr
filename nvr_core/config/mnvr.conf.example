@@ -1,0 +1,137 @@
+# ============================================================================
+# mnvr.conf – mNVR System Configuration File
+# ============================================================================
+# Settings here are loaded first; DB system_config table overrides any
+# value that has been persisted there.
+
+# ---- Device identity ----
+device_id     = MNVR-TRAIN-001
+device_name   = Coach-A NVR
+
+# ---- Storage paths ----
+storage_base  = /storage/recordings
+hls_base      = /storage/hls
+# PostgreSQL connection string
+# Format: host=<ip> port=<port> dbname=<db> user=<user> password=<pass> sslmode=disable
+db_path       = host=172.210.120.118 port=5432 dbname=mnvr user=mnvr password=mnvr sslmode=disable
+log_dir       = /var/log/mnvr
+
+# ---- Recording ----
+recording_retention_days = 30
+segment_duration_sec     = 900       # 15-minute MP4 segments
+segment_max_size_mb      = 2048      # 2 GB max per segment
+enable_audio             = true
+enable_watermark         = true
+
+# ---- HLS ----
+hls_segment_sec          = 4
+hls_window_size          = 10
+hls_delete_old_segments  = true
+
+# ---- Live streaming ----
+rtsp_server_port         = 8554
+webrtc_server_port       = 8080
+
+# ---- AI ----
+enable_face_detection    = true
+enable_motion_detection  = true
+enable_rdas              = false      # Enable only on driver cab camera
+motion_threshold         = 0.05      # 5% pixel change triggers motion event
+
+# ---- REST API ----
+api_port                 = 8080
+api_tls_enabled          = false
+# api_tls_cert           = /etc/mnvr/certs/server.crt
+# api_tls_key            = /etc/mnvr/certs/server.key
+
+# ---- Time synchronisation ----
+time_sync_method         = PTP       # PTP | NTP | GPS
+ntp_server               = pool.ntp.org
+ptp_domain               = 0
+
+# ---- GPS telemetry (feeds the GPS/speed watermark on live view + recordings) ----
+# Set gps_enabled = true and point gps_serial_device at your GPS receiver's
+# serial device once the hardware is installed. Until then this stays off
+# and the watermark just shows "GPS: NO FIX".
+gps_enabled              = false
+gps_serial_device        = /dev/ttyUSB0
+gps_baud_rate            = 9600     # 4800 | 9600 | 19200 | 38400 | 57600 | 115200
+
+# ---- Health monitor ----
+health_poll_interval_sec = 10
+cpu_warn_threshold       = 85.0
+mem_warn_threshold       = 90.0
+disk_warn_threshold      = 90.0
+
+# ---- Logging ----
+# log_min_level: 0=TRACE 1=DEBUG 2=INFO 3=WARN 4=ERROR 5=FATAL
+log_min_level            = 2
+log_to_syslog            = false
+
+# ============================================================================
+# ONVIF Profile S Configuration
+# ============================================================================
+# Global ONVIF settings
+# Multicast discovery address (standard: 239.255.255.250:3702)
+onvif_multicast_ip       = 239.255.255.250
+onvif_multicast_port     = 3702
+onvif_discovery_interval = 60
+onvif_probe_timeout_ms   = 3000
+onvif_enable_discovery   = true
+
+# Per-camera ONVIF credentials (slots 1..16)
+# Each camera needs: IP, ONVIF username, ONVIF password, and optionally port.
+# The ONVIF port defaults to 80 if not specified.
+# Camera slot numbers correspond to camera_id in the cameras DB table.
+#
+# IMPORTANT: ONVIF credentials are often different from RTSP credentials.
+# Create an ONVIF user with admin role in the camera's web interface.
+#
+# Format:
+#   onvif_cam_<slot>_ip   = <camera IP address>
+#   onvif_cam_<slot>_user = <ONVIF username>
+#   onvif_cam_<slot>_pass = <ONVIF password>
+#   onvif_cam_<slot>_port = <ONVIF HTTP port, default 80>
+
+# Camera 1 - Front Entrance (CPPLUS CP-UNC-TA41L5C-D-V3)
+onvif_cam_1_ip           = 172.210.140.91
+onvif_cam_1_user         = mnvr
+onvif_cam_1_pass         = bel123456
+onvif_cam_1_port         = 80
+onvif_cam_1_rtsp_user    = admin
+onvif_cam_1_rtsp_pass    = bel123456
+onvif_cam_1_type         = DOOR
+onvif_cam_1_location     = Front Entrance
+
+# Camera 2 (example - uncomment and fill in)
+# onvif_cam_2_ip         = 172.210.140.92
+# onvif_cam_2_user       = mnvr
+# onvif_cam_2_pass       = bel123456
+# onvif_cam_2_port       = 80
+# onvif_cam_2_rtsp_user  = admin
+# onvif_cam_2_rtsp_pass  = bel123456
+# onvif_cam_2_type       = INTERIOR
+# onvif_cam_2_location   = Passenger Area Rear
+
+# Camera 3
+# onvif_cam_3_ip         = 172.210.140.93
+# onvif_cam_3_user       = mnvr
+# onvif_cam_3_pass       = bel123456
+# onvif_cam_3_rtsp_user  = admin
+# onvif_cam_3_rtsp_pass  = bel123456
+# onvif_cam_3_type       = INTERIOR
+# onvif_cam_3_location   = Coach Mid Section
+
+# Camera 4
+# onvif_cam_4_ip         = 172.210.140.94
+# onvif_cam_4_user       = mnvr
+# onvif_cam_4_pass       = bel123456
+# onvif_cam_4_rtsp_user  = admin
+# onvif_cam_4_rtsp_pass  = bel123456
+# onvif_cam_4_type       = DRIVER_CAB
+# onvif_cam_4_location   = Driver Cab
+
+# Cameras 5-16: same pattern
+# onvif_cam_5_ip         = ...
+# ...
+# onvif_cam_16_ip        = ...

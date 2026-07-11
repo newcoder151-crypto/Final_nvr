@@ -1,0 +1,157 @@
+version: "3.9"
+# =============================================================================
+#  Railway mNVR — docker compose up
+#  Services: postgres → yolo → api → mediamtx → mtxsync → recorder → frontend
+# =============================================================================
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mnvr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mnvr
+      POSTGRES_USER: mnvr
+      POSTGRES_PASSWORD: mnvr
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./server/seed-docker.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mnvr -d mnvr"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  yolo:
+    build:
+      context: ./server/ai
+      dockerfile: Dockerfile
+    container_name: mnvr-yolo
+    restart: unless-stopped
+    environment:
+      YOLO_MODEL: yolov8n.pt
+    volumes:
+      - yolo_models:/root/.config/Ultralytics
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mnvr-api
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: mnvr
+      DB_USER: mnvr
+      DB_PASSWORD: mnvr
+      JWT_SECRET: railway-nvr-jwt-secret-change-in-production
+      YOLO_SIDECAR_URL: http://yolo:8000
+      CORS_ORIGIN: "*"
+      STORAGE_PATH: /storage
+      RECORDINGS_PATH: /storage/recordings
+      HLS_PATH: /storage/hls
+      MEDIAMTX_API: http://mediamtx:9997
+      MEDIAMTX_WEB: http://localhost:8889
+      MEDIAMTX_HLS: http://localhost:8888
+      MEDIAMTX_RTSP: localhost:8554
+    volumes:
+      - nvr_storage:/storage
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mnvr-mediamtx
+    restart: unless-stopped
+    network_mode: host       # needed so WebRTC ICE candidates resolve correctly
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    # Ports exposed via network_mode: host
+    # :8554 RTSP, :8889 WebRTC, :8888 HLS, :9997 API, :9998 metrics
+
+  mtxsync:
+    build:
+      context: ./mediamtx
+      dockerfile: Dockerfile
+    container_name: mnvr-mtxsync
+    restart: unless-stopped
+    environment:
+      MEDIAMTX_API: http://localhost:9997   # host network (mediamtx uses host mode)
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: mnvr
+      DB_USER: mnvr
+      DB_PASSWORD: mnvr
+      SYNC_INTERVAL_SECS: 15
+    depends_on:
+      - mediamtx
+      - postgres
+    network_mode: host
+
+  recorder:
+    build:
+      context: ./recorder
+      dockerfile: Dockerfile
+    container_name: mnvr-recorder
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:3001
+      API_USER: admin
+      API_PASS: Admin@123
+      STORAGE_PATH: /storage
+      RECORDINGS_PATH: /storage/recordings
+      HLS_PATH: /storage/hls
+      SEGMENT_SECONDS: 60
+      HLS_SEGMENT_SECS: 4
+      POLL_CAMERAS_SECS: 30
+      RETENTION_DAYS: 30
+    volumes:
+      - nvr_storage:/storage
+    depends_on:
+      api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_URL: ""
+        VITE_MEDIAMTX_WEB: ""
+        VITE_MEDIAMTX_HLS: ""
+    container_name: mnvr-frontend
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  nvr_storage:
+  yolo_models:
