@@ -100,6 +100,9 @@ typedef struct {
     volatile bool   gps_has_fix;
 
     AppContext   *ctx;
+    /* Consecutive failure count, drives exponential retry backoff — see
+     * streamer_thread_fn(). Resets to 0 on any successful connection. */
+    int retry_count;
 } CamStreamer;
 
 /**

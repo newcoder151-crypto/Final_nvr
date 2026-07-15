@@ -86,15 +86,28 @@ void* recorder_thread(void *arg) {
 
     /* Retry loop: restart the pipeline on error/disconnect until should_stop */
     while (!rec->should_stop) {
+        gint64 attempt_start = g_get_monotonic_time();
         if (rec->loop) {
             g_main_loop_run(rec->loop);
         }
+        gint64 elapsed_sec = (g_get_monotonic_time() - attempt_start) / G_USEC_PER_SEC;
 
         if (rec->should_stop) break;
 
+        /* A connection that stayed up a while was a real success — reset
+         * backoff. A quick failure escalates it (5s, 10s, 20s, capped at
+         * 30s) instead of hammering a struggling camera indefinitely. */
+        if (elapsed_sec >= 10) {
+            rec->retry_count = 0;
+        } else {
+            rec->retry_count++;
+        }
+        int backoff_sec = 5 * (1 << MIN(rec->retry_count, 2));
+        if (backoff_sec > 30) backoff_sec = 30;
+
         /* Pipeline ended (error or EOS) — rebuild and retry after a delay */
-        g_print("[%s] Pipeline stopped, retrying in 5s...\n", rec->camera_name);
-        usleep(5000000);  /* 5 second back-off */
+        g_print("[%s] Pipeline stopped, retrying in %ds...\n", rec->camera_name, backoff_sec);
+        usleep((unsigned)backoff_sec * 1000000);  /* exponential back-off */
 
         if (rec->should_stop) break;
 

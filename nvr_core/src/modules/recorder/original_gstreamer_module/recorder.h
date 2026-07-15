@@ -79,6 +79,10 @@ typedef struct {
 
     /** @brief GLib main loop for this recorder */
     GMainLoop *loop;
+
+    /* Consecutive failure count, drives exponential retry backoff — see
+     * recorder_thread(). Resets to 0 after a connection stays up a while. */
+    int retry_count;
     
     /** @brief Recording thread handle */
     pthread_t thread;

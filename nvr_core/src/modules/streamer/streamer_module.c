@@ -176,11 +176,21 @@ static MnvrResult build_streamer_pipeline(CamStreamer *cam)
 
     /* Configure rtspsrc — credentials via user-id/user-pw, not embedded in URL.
      * Embedding passwords containing '@' or ':' in the URL breaks rtspsrc's
-     * URL parser and causes spurious 401 Unauthorized errors. */
+     * URL parser and causes spurious 401 Unauthorized errors.
+     * Full property set matches recorder.c's (confirmed reliable against
+     * this camera fleet via packet-level testing) rather than just
+     * "protocols" alone — do-rtcp/ntp-sync/buffer-mode/timeouts all matter
+     * for connection reliability, not just transport selection. */
     g_object_set(cam->rtspsrc,
                  "location", cam->rtsp_url,
                  "latency",  100,
                  "protocols", 4,   /* TCP only */
+                 "timeout", 10000000,        /* 10s */
+                 "tcp-timeout", 10000000,    /* 10s */
+                 "user-agent", "GStreamer RTSP client",
+                 "do-rtcp", FALSE,
+                 "ntp-sync", FALSE,
+                 "buffer-mode", 0,
                  NULL);
     if (cam->rtsp_username[0])
         g_object_set(cam->rtspsrc, "user-id", cam->rtsp_username, NULL);
@@ -327,14 +337,28 @@ static void *streamer_thread_fn(void *arg)
         if (!cam->loop)
             cam->loop = g_main_loop_new(NULL, FALSE);
 
+        gint64 attempt_start = g_get_monotonic_time();
         gst_element_set_state(cam->pipeline, GST_STATE_PLAYING);
         g_main_loop_run(cam->loop);   /* blocks until error or EOS */
+        gint64 elapsed_sec = (g_get_monotonic_time() - attempt_start) / G_USEC_PER_SEC;
 
         if (!cam->running) break;
 
-        LOG_WARN(cam->ctx,"STREAMER","[%s] Pipeline stopped, retrying in 5s",
-                 cam->camera_name);
-        sleep(5);
+        /* A connection that stayed up for a while was a real success —
+         * reset backoff. A quick failure (never really connected) escalates
+         * it, capped at 30s, instead of hammering a struggling camera with
+         * a reconnect every 5s indefinitely. */
+        if (elapsed_sec >= 10) {
+            cam->retry_count = 0;
+        } else {
+            cam->retry_count++;
+        }
+        int backoff_sec = 5 * (1 << MIN(cam->retry_count, 2)); /* 5s, 10s, 20s, 20s... */
+        if (backoff_sec > 30) backoff_sec = 30;
+
+        LOG_WARN(cam->ctx,"STREAMER","[%s] Pipeline stopped, retrying in %ds",
+                 cam->camera_name, backoff_sec);
+        sleep((unsigned)backoff_sec);
 
         if (!cam->running) break;
 

@@ -70,6 +70,16 @@ MnvrResult rtsp_relay_add_camera(RtspRelayModule *m, int camera_id)
      * pipeline (and re-binding the UDP port) per viewer, which would fail
      * on the second viewer since only one udpsrc can bind a given port. */
     gst_rtsp_media_factory_set_shared(factory, TRUE);
+    /* Keep the pipeline alive permanently, even with zero clients
+     * connected, instead of tearing it down when the last client
+     * disconnects and rebuilding it fresh on the next connection. A live
+     * camera feed doesn't care whether 0 or N clients are watching, so
+     * there's no reason to cycle the pipeline — and repeatedly
+     * creating/destroying it (which happened on every one of MediaMTX's
+     * reconnect attempts) was leaking a file descriptor pair each time,
+     * eventually exhausting mnvrd's FD limit and taking the whole relay
+     * listener down with it. */
+    gst_rtsp_media_factory_set_suspend_mode(factory, GST_RTSP_SUSPEND_MODE_NONE);
 
     char path[32];
     snprintf(path, sizeof(path), "/cam_%d", camera_id);

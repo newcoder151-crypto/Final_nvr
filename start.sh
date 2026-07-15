@@ -78,7 +78,25 @@ pid_alive() { local p; p=$(pid_read "$1"); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/
 pid_kill()  {
   local p; p=$(pid_read "$1")
   if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
-    kill "$p" 2>/dev/null && ok "Stopped $1 (PID $p)" || true
+    kill "$p" 2>/dev/null || true
+    # Wait up to 10s for a clean SIGTERM shutdown before escalating —
+    # mnvrd especially can take a moment if a thread is mid-retry on a
+    # camera connection. Verify it's actually gone; don't just fire the
+    # signal and assume.
+    for _ in $(seq 1 20); do
+      kill -0 "$p" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "$p" 2>/dev/null; then
+      warn "$1 (PID $p) didn't exit after SIGTERM — forcing with SIGKILL"
+      kill -9 "$p" 2>/dev/null || true
+      sleep 0.5
+    fi
+    if kill -0 "$p" 2>/dev/null; then
+      err "$1 (PID $p) still alive after SIGKILL — this shouldn't happen"
+    else
+      ok "Stopped $1 (PID $p)"
+    fi
   fi
   rm -f "$PID_DIR/$1.pid"
 }
@@ -89,6 +107,18 @@ kill_all() {
   pkill -f "recorder.py"             2>/dev/null || true
   pkill -f "mediamtx-sync.py"        2>/dev/null || true
   pkill -f "mediamtx"                2>/dev/null || true
+  # Safety net for mnvrd specifically — every other service already has
+  # one above. Without this, a stale/wrong PID file (or a SIGTERM that
+  # didn't land in time before pid_kill's own escalation ran) could leave
+  # an orphaned mnvrd running, invisible to --status, competing with the
+  # next one for the same camera connections. Verified this actually
+  # happened: three overlapping mnvrd processes were found running
+  # simultaneously after repeated --stop/--restart cycles.
+  if pgrep -f "nvr_core/build/mnvrd" >/dev/null 2>&1; then
+    warn "Found leftover mnvrd process(es) — force-killing"
+    pkill -9 -f "nvr_core/build/mnvrd" 2>/dev/null || true
+    sleep 0.5
+  fi
 }
 
 # ── --logs ────────────────────────────────────────────────────────────────────
