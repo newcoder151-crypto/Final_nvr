@@ -101,11 +101,12 @@ pid_kill()  {
   rm -f "$PID_DIR/$1.pid"
 }
 kill_all() {
-  for s in frontend api ai recorder nvr mediamtx mtxsync; do pid_kill "$s"; done
+  for s in frontend api ai recorder nvr mediamtx mtxsync streammgr; do pid_kill "$s"; done
   pkill -f "node src/index.js"       2>/dev/null || true
   pkill -f "uvicorn sidecar"         2>/dev/null || true
   pkill -f "recorder.py"             2>/dev/null || true
   pkill -f "mediamtx-sync.py"        2>/dev/null || true
+  pkill -f "stream_manager.py"       2>/dev/null || true
   pkill -f "mediamtx"                2>/dev/null || true
   # Safety net for mnvrd specifically — every other service already has
   # one above. Without this, a stale/wrong PID file (or a SIGTERM that
@@ -152,7 +153,7 @@ fi
 # ── --status ──────────────────────────────────────────────────────────────────
 if $DO_STATUS; then
   hdr "Railway mNVR — Service Status"
-  for svc in api ai recorder frontend nvr mediamtx mtxsync; do
+  for svc in api ai recorder frontend nvr mediamtx mtxsync streammgr; do
     if pid_alive "$svc"; then
       printf "  ${G}●${NC} %-12s PID %s\n" "$svc" "$(pid_read $svc)"
     else
@@ -483,7 +484,17 @@ else
 fi
 
 # C daemon
-if $DO_WITH_NVR; then
+# DISABLED (camera connections only): today's extensive testing (packet
+# captures, side-by-side comparisons) proved GStreamer's rtspsrc has real
+# reliability problems against this camera fleet specifically, while
+# ffmpeg worked cleanly every single time against the exact same URLs.
+# stream_manager.py (started below) now handles live view + recording via
+# ffmpeg instead. mnvrd itself is NOT started at all right now, since its
+# only other jobs (AI/YOLO detection, health monitoring) aren't worth
+# running a second, competing set of camera connections for — re-enable
+# by flipping DO_WITH_NVR back on below once/if rtspsrc's reliability
+# against this fleet is revisited.
+if false && $DO_WITH_NVR; then
   if [[ -f "$NVR_BIN" ]]; then
     sed -i "s|db_path.*=.*|db_path = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASSWORD} sslmode=disable|" "$NVR_CONF" 2>/dev/null || true
     sed -i "s|storage_base.*=.*|storage_base = /storage/recordings|" "$NVR_CONF" 2>/dev/null || true
@@ -494,6 +505,26 @@ if $DO_WITH_NVR; then
   else
     err "mnvrd binary not found — run: bash start.sh --build-nvr"
   fi
+else
+  warn "mnvrd disabled — using ffmpeg-based stream_manager.py instead (see start.sh comments)"
+fi
+
+# ffmpeg-based stream manager — live view (push to MediaMTX) + recording,
+# one thread per camera per purpose. Replaces mnvrd's native GStreamer
+# camera connections above.
+STREAM_MGR="$ROOT/stream_manager.py"
+if [[ -f "$STREAM_MGR" ]]; then
+  DB_HOST="${DB_HOST}" DB_PORT="${DB_PORT}" DB_NAME="${DB_NAME}" \
+  DB_USER="${DB_USER}" DB_PASSWORD="${DB_PASSWORD}" \
+  RECORDINGS_PATH="${STORAGE:-/storage}/recordings" \
+  SEGMENT_SECONDS="${SEGMENT_SECONDS:-120}" \
+  MEDIAMTX_RTSP_HOST="127.0.0.1" MEDIAMTX_RTSP_PORT="8554" \
+  nohup "$VENV/bin/python" "$STREAM_MGR" > "$LOG_DIR/stream_manager.log" 2>&1 &
+  pid_write "streammgr" "$!"; sleep 1
+  pid_alive "streammgr" && ok "stream_manager PID $(pid_read streammgr)  (logs/stream_manager.log)" \
+    || err "stream_manager exited — check logs/stream_manager.log"
+else
+  err "stream_manager.py not found at $STREAM_MGR"
 fi
 
 # =============================================================================

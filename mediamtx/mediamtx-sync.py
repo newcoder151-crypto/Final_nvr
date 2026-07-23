@@ -151,6 +151,31 @@ def wait_for_mediamtx():
         time.sleep(2)
     log.error("MediaMTX API not responding after 240s — continuing anyway")
 
+def wait_for_relay(host: str, port: str):
+    """Block until mnvrd's RTSP relay is actually accepting TCP connections.
+
+    start.sh launches MediaMTX/this script (step 7) before mnvrd (step 9),
+    so without this wait, MediaMTX would immediately try to pull from the
+    relay before it exists — logging a harmless-but-confusing burst of
+    "connection refused" on every single restart. Waiting here means paths
+    only ever get added once there's actually something to pull from,
+    regardless of script step ordering.
+    """
+    import socket
+    log.info(f"Waiting for mnvrd's RTSP relay at {host}:{port} ...")
+    for i in range(120):
+        try:
+            with socket.create_connection((host, int(port)), timeout=2):
+                log.info("✓ RTSP relay ready")
+                return
+        except Exception:
+            pass
+        if i % 6 == 0 and i > 0:
+            log.info(f"  ...still waiting for relay ({i*2}s) — is mnvrd still starting up?")
+        time.sleep(2)
+    log.warning(f"Relay at {host}:{port} not reachable after 240s — "
+                "continuing anyway (mnvrd may have failed to start; check logs/nvr.log)")
+
 # RTSP relay hosted by mnvrd itself (see nvr_core/src/modules/rtsp_relay).
 # Pointing MediaMTX here instead of at the camera directly means mnvrd is
 # the ONLY thing that ever opens an RTSP session to the physical camera —
@@ -166,28 +191,31 @@ RTSP_RELAY_PORT = os.environ.get("RTSP_RELAY_PORT", "8555")
 # ── Main sync loop ─────────────────────────────────────────────────────────────
 def sync_once(conn):
     cameras = fetch_active_cameras(conn)
-    wanted: dict[str, str] = {}     # path_name → rtsp_url_with_creds
 
-    for cam in cameras:
-        path_name = f"{PATH_PREFIX}{cam['camera_id']}"
-        # mnvrd's relay is unauthenticated on localhost — no credentials
-        # needed here (the camera's own creds are used by mnvrd itself,
-        # configured via cameras_config_details).
-        rtsp = f"rtsp://{RTSP_RELAY_HOST}:{RTSP_RELAY_PORT}/{path_name}"
-        wanted[path_name] = rtsp
-
-    existing = mtx_list_paths()
-
-    # Add / update
-    for path_name, rtsp_url in wanted.items():
-        mtx_add_path(path_name, rtsp_url)
-
-    # Remove stale paths (camera deleted or set inactive)
-    for path_name in existing - set(wanted.keys()):
-        mtx_remove_path(path_name)
+    # DISABLED: no longer adding "source"-based paths here. ffmpeg
+    # (stream_manager.py) now pushes each camera's LIVE profile directly
+    # into MediaMTX as an RTSP publisher — MediaMTX auto-creates a path on
+    # first publish when no explicit source is configured for it, and
+    # rejects a publisher for any path that DOES have one, which is why
+    # this had to be turned off rather than left pointing at the old
+    # relay (that relay is gone; ffmpeg replaced it — see
+    # stream_manager.py's module docstring for the full picture).
+    #
+    # wanted: dict[str, str] = {}
+    # for cam in cameras:
+    #     path_name = f"{PATH_PREFIX}{cam['camera_id']}"
+    #     rtsp = f"rtsp://{RTSP_RELAY_HOST}:{RTSP_RELAY_PORT}/{path_name}"
+    #     wanted[path_name] = rtsp
+    # existing = mtx_list_paths()
+    # for path_name, rtsp_url in wanted.items():
+    #     mtx_add_path(path_name, rtsp_url)
+    # for path_name in existing - set(wanted.keys()):
+    #     mtx_remove_path(path_name)
 
     if cameras:
-        log.info(f"Sync: {len(wanted)} camera path(s) active in MediaMTX")
+        log.info(f"Sync: {len(cameras)} active camera(s) in DB "
+                 f"(paths now managed by ffmpeg publishers, not this script)")
+
     else:
         log.warning("No active cameras with RTSP URLs found in DB")
 
@@ -200,6 +228,8 @@ def main():
     log.info("=" * 60)
 
     wait_for_mediamtx()
+    # wait_for_relay() removed — no relay to wait for anymore; ffmpeg
+    # (stream_manager.py) pushes directly, MediaMTX just needs to be up.
 
     conn = get_db()
     log.info("✓ Connected to PostgreSQL")
