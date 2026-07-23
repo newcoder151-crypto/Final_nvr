@@ -53,19 +53,21 @@ router.post('/', authenticate, requireRole('ADMIN'), async (req, res) => {
             rtsp_port=554, username, password_hash, manufacturer, model,
             resolution_width=1920, resolution_height=1080, target_fps=25,
             video_codec='H.265', location_description, physical_position,
-            ptz_supported=0, audio_supported=0 } = req.body;
+            ptz_supported=0, audio_supported=0,
+            ai_model='yolov8n.pt', ai_confidence_threshold=0.35, ai_detection_enabled=true } = req.body;
     if (!camera_name) return res.status(400).json({ error: 'camera_name required' });
     const cam = await queryOne(
       `INSERT INTO cameras(camera_name,camera_type,ip_address,rtsp_url,rtsp_port,
          username,password_hash,manufacturer,model,resolution_width,resolution_height,
          target_fps,video_codec,location_description,physical_position,
-         ptz_supported,audio_supported)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         ptz_supported,audio_supported,ai_model,ai_confidence_threshold,ai_detection_enabled)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING *`,
       [camera_name,camera_type.toUpperCase(),ip_address,rtsp_url,rtsp_port,
        username||null,password_hash||null,manufacturer||null,model||null,
        resolution_width,resolution_height,target_fps,video_codec,
-       location_description||null,physical_position||null,ptz_supported,audio_supported]);
+       location_description||null,physical_position||null,ptz_supported,audio_supported,
+       ai_model,ai_confidence_threshold,ai_detection_enabled]);
     broadcast({ type: 'camera.created', data: cam });
     res.status(201).json(cam);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -77,7 +79,8 @@ router.put('/:id', authenticate, requireRole('ADMIN','OPERATOR'), async (req, re
                      'location_description','physical_position','status','target_fps',
                      'video_codec','resolution_width','resolution_height',
                      'ptz_supported','audio_supported','manufacturer','model',
-                     'hls_playlist_url','hls_output_dir','rec_output_dir'];
+                     'hls_playlist_url','hls_output_dir','rec_output_dir',
+                     'ai_model','ai_confidence_threshold','ai_detection_enabled'];
     const fields = [], params = [];
     for (const [k,v] of Object.entries(req.body))
       if (allowed.includes(k)) { params.push(v); fields.push(`${k}=$${params.length}`); }

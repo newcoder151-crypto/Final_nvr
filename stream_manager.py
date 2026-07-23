@@ -37,6 +37,8 @@ connections are disabled).
 """
 import os
 import sys
+import re
+import json
 import time
 import shlex
 import signal
@@ -44,6 +46,7 @@ import logging
 import subprocess
 import threading
 from pathlib import Path
+from datetime import datetime, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -142,12 +145,33 @@ def run_live(camera_id: int, camera_name: str, url: str):
     target = f"rtsp://{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/cam_{camera_id}"
     retry_count = 0
     while not _shutdown.is_set():
+        # -rtsp_transport is per-URL: the occurrence before -i only governs
+        # reading from the camera. Without repeating it as an output option
+        # (after -i, before the target URL), ffmpeg's RTSP muxer falls back
+        # to its default lower transport (UDP) when publishing into
+        # MediaMTX — exactly the reliability problem this project already
+        # moved away from on the camera-facing side. Repeating it here makes
+        # camera -> ffmpeg -> MediaMTX TCP end-to-end, which is what
+        # actually gets MediaMTX's live source (and therefore both the
+        # WebRTC and HLS outputs the frontend consumes) to come up reliably.
+        # -analyzeduration/-probesize: without these, ffmpeg sometimes opens
+        # the RTSP publish to MediaMTX before it has captured a full SPS/PPS
+        # from the camera (sent once near connection start, not on every
+        # frame). That race produces an SDP with incomplete codec parameters,
+        # which MediaMTX rejects with "400 Bad Request" on ANNOUNCE — seen
+        # intermittently on some cameras/connection attempts and not others,
+        # even with identical H.264 settings, because it depends on exactly
+        # when the SPS/PPS lands relative to ffmpeg's default (short) probe
+        # window. Forcing a longer probe makes ffmpeg wait for it reliably.
         cmd = [
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
+            "-analyzeduration", "10M",
+            "-probesize", "10M",
             "-i", url,
             "-c", "copy",
             "-f", "rtsp",
+            "-rtsp_transport", "tcp",
             target,
         ]
         log.info(f"[{camera_name}] LIVE starting -> {target}")
@@ -253,6 +277,123 @@ def run_record(camera_id: int, camera_name: str, url: str, output_dir: str):
         _shutdown.wait(delay)
 
 
+# ── Recording indexer ───────────────────────────────────────────────────────
+# recorder/recorder.py used to be the thing that called POST /api/recordings
+# for every finished segment, but it's disabled in start.sh now that this
+# script owns recording. Without something doing that, files land correctly
+# in rec_output_dir but the `recordings` table (which the video player reads
+# via GET /api/recordings) never gets a row for them, so nothing shows up in
+# the UI even though the files are genuinely there. This closes that gap by
+# writing directly to Postgres (no dependency on the API/auth being up).
+_SEGMENT_RE = re.compile(r"^cam_(\d+)_(\d{8})_(\d{6})\.mp4$")
+
+
+def _ffprobe(path: str) -> dict | None:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=20,
+        )
+        return json.loads(out.stdout) if out.returncode == 0 and out.stdout else None
+    except Exception:
+        return None
+
+
+def _video_codec_label(codec_name: str) -> str:
+    return {"h264": "H.264", "hevc": "H.265", "h265": "H.265"}.get(
+        (codec_name or "").lower(), (codec_name or "H.264").upper())
+
+
+def _upsert_recording(conn, camera_id: int, path: Path):
+    m = _SEGMENT_RE.match(path.name)
+    if not m:
+        return  # not one of our segment files (e.g. a leftover/unexpected file)
+    try:
+        start_ts = datetime.strptime(f"{m.group(2)}{m.group(3)}", "%Y%m%d%H%M%S")
+    except ValueError:
+        return
+
+    probe = _ffprobe(str(path))
+    if not probe:
+        return  # file may still be mid-write/corrupt; will retry next poll
+
+    fmt = probe.get("format", {})
+    streams = probe.get("streams", [])
+    v = next((s for s in streams if s.get("codec_type") == "video"), {})
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+
+    try:
+        duration = float(fmt.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    try:
+        num, den = (v.get("r_frame_rate") or "0/1").split("/")
+        fps = round(float(num) / float(den), 2) if float(den) else None
+    except Exception:
+        fps = None
+
+    try:
+        file_size = int(fmt.get("size") or path.stat().st_size)
+    except Exception:
+        file_size = path.stat().st_size
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO recordings(
+                camera_id, file_path, file_name, file_size_bytes, duration_seconds,
+                start_timestamp, end_timestamp, video_codec, resolution_width,
+                resolution_height, fps_actual, has_audio, recording_mode, status)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CONTINUOUS','COMPLETED')
+            ON CONFLICT (file_path) DO UPDATE SET
+                file_size_bytes=EXCLUDED.file_size_bytes,
+                duration_seconds=EXCLUDED.duration_seconds,
+                end_timestamp=EXCLUDED.end_timestamp,
+                status='COMPLETED',
+                updated_at=NOW()
+            """,
+            (camera_id, str(path), path.name, file_size, int(duration),
+             start_ts, start_ts + timedelta(seconds=duration),
+             _video_codec_label(v.get("codec_name")),
+             v.get("width"), v.get("height"), fps, int(has_audio)),
+        )
+    conn.commit()
+
+
+def index_recordings(camera_id: int, camera_name: str, output_dir: str):
+    """Polls output_dir for this camera's segments and upserts finished ones
+    into the DB. The newest-by-name file is always skipped — ffmpeg is still
+    writing it — everything older is guaranteed closed and safe to probe."""
+    conn = get_db()
+    indexed: set[str] = set()
+    poll_interval = 30
+    while not _shutdown.is_set():
+        try:
+            files = sorted(Path(output_dir).glob(f"cam_{camera_id}_*.mp4"))
+            for f in files[:-1]:  # skip the newest (still being written)
+                key = str(f)
+                if key in indexed:
+                    continue
+                try:
+                    _upsert_recording(conn, camera_id, f)
+                    indexed.add(key)
+                except Exception as e:
+                    log.warning(f"[{camera_name}] recording index failed for {f.name}: {e}")
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning(f"[{camera_name}] recording indexer error ({e}), reconnecting to DB...")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = get_db()
+        _shutdown.wait(poll_interval)
+
+
 # ── Main: one LIVE + one REC thread per camera, refreshed from the DB ──────
 def main():
     log.info("=" * 60)
@@ -295,11 +436,14 @@ def main():
                                        name=f"live-{cid}", daemon=True)
             t_rec = threading.Thread(target=run_record, args=(cid, name, rec_url, out_dir),
                                       name=f"rec-{cid}", daemon=True)
+            t_idx = threading.Thread(target=index_recordings, args=(cid, name, out_dir),
+                                      name=f"idx-{cid}", daemon=True)
             t_live.start()
             t_rec.start()
-            threads.extend([t_live, t_rec])
+            t_idx.start()
+            threads.extend([t_live, t_rec, t_idx])
             started_cameras.add(cid)
-            log.info(f"[{name}] Started LIVE + REC threads (camera_id={cid})")
+            log.info(f"[{name}] Started LIVE + REC + recording-indexer threads (camera_id={cid})")
 
         _shutdown.wait(CAMERA_REFRESH_INTERVAL)
 

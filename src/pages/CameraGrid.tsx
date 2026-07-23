@@ -63,6 +63,7 @@ const LAYOUTS = [
 function useAiOverlay(
   videoRef: React.RefObject<HTMLVideoElement>,
   enabled: boolean,
+  model?: string,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -84,7 +85,7 @@ function useAiOverlay(
         async (blob) => {
           if (!blob) return;
           try {
-            const res = await detectObjects(blob, { conf: 0.35 });
+            const res = await detectObjects(blob, { conf: 0.35, model });
             c.width = tmp.width;
             c.height = tmp.height;
             const ctx = c.getContext("2d")!;
@@ -110,7 +111,7 @@ function useAiOverlay(
       );
     }, 3000);
     return () => clearInterval(id);
-  }, [enabled, videoRef]);
+  }, [enabled, videoRef, model]);
   return canvasRef;
 }
 
@@ -138,7 +139,7 @@ function CameraTile({ cam, compact, onExpand }: TileProps) {
   const [mode, setMode] = useState<"webrtc" | "hls" | "none">("none");
   const [aiEnabled, setAiEnabled] = useState(false);
   const [retry, setRetry] = useState(0);
-  const canvasRef = useAiOverlay(videoRef, aiEnabled);
+  const canvasRef = useAiOverlay(videoRef, aiEnabled, cam.ai_model);
 
   const whepUrl =
     cam.mediamtx?.webrtc_url ?? `${MTX_WEB}/cam_${cam.camera_id}/whep`;
@@ -368,7 +369,7 @@ function ExpandedDialog({
   const [aiEnabled, setAiEnabled] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const [connState, setConnState] = useState<"connecting" | "connected" | "failed">("connecting");
-  const canvasRef = useAiOverlay(videoRef, aiEnabled);
+  const canvasRef = useAiOverlay(videoRef, aiEnabled, cam?.ai_model);
 
   // Reset AI/controls when dialog closes/changes
   useEffect(() => {

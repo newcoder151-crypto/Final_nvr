@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS cameras (
     rec_output_dir TEXT,                         -- MP4 recording output directory, e.g. /storage/recordings/cam_1
     hls_output_dir TEXT,                         -- HLS segments output directory,  e.g. /storage/hls/cam_1
     hls_playlist_url TEXT,                       -- Public HLS playlist URL,         e.g. /hls/cam_1/stream.m3u8
+    -- Per-camera AI configuration (see server/migrations/002_ai_model_config.sql)
+    ai_model TEXT NOT NULL DEFAULT 'yolov8n.pt',            -- YOLO weights used for this camera's detections
+    ai_confidence_threshold NUMERIC(3,2) NOT NULL DEFAULT 0.35,
+    ai_detection_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     CONSTRAINT chk_camera_type CHECK (camera_type IN ('INTERIOR', 'EXTERIOR', 'DOOR', 'DRIVER_CAB')),
     CONSTRAINT chk_camera_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'FAULTY', 'MAINTENANCE')),
     CONSTRAINT chk_video_codec CHECK (video_codec IN ('H.264', 'H.265', 'H.265+'))

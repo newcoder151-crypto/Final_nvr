@@ -138,6 +138,35 @@ router.get('/analytics', authenticate, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Curated list of Ultralytics YOLO weights known to work with sidecar.py's
+// `YOLO(name)` loader. Ultralytics auto-downloads any of these by name on
+// first use, so this list can include weights that aren't cached locally yet
+// — the sidecar fetches them lazily on first request.
+const AVAILABLE_AI_MODELS = [
+  { value: 'yolov8n.pt', label: 'YOLOv8 Nano',    note: 'Fastest, lowest accuracy — good for low-power/edge cameras' },
+  { value: 'yolov8s.pt', label: 'YOLOv8 Small',   note: 'Balanced speed/accuracy' },
+  { value: 'yolov8m.pt', label: 'YOLOv8 Medium',  note: 'Higher accuracy, more CPU/GPU load' },
+  { value: 'yolov8l.pt', label: 'YOLOv8 Large',   note: 'High accuracy, GPU recommended' },
+  { value: 'yolov8x.pt', label: 'YOLOv8 X-Large', note: 'Highest accuracy, GPU required for real-time use' },
+  { value: 'yolo11n.pt', label: 'YOLO11 Nano',    note: 'Newer architecture, fastest variant' },
+  { value: 'yolo11s.pt', label: 'YOLO11 Small',   note: 'Newer architecture, balanced' },
+];
+
+// GET /api/ai/models — models available for the per-camera picker
+router.get('/models', authenticate, async (req, res) => {
+  let loaded = [];
+  let device = null;
+  try {
+    const r = await axios.get(`${YOLO_URL()}/health`, { timeout: 3000 });
+    loaded = r.data?.loaded_models || [];
+    device = r.data?.device || null;
+  } catch {
+    // Sidecar may be down/starting — still return the curated list so the
+    // picker in the camera controls isn't blocked by that.
+  }
+  res.json({ models: AVAILABLE_AI_MODELS, loaded_models: loaded, device });
+});
+
 // GET /api/ai/health — sidecar health check
 router.get('/health', authenticate, async (req, res) => {
   try {

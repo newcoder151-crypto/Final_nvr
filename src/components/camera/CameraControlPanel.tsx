@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Home, Plus, Minus,
   Video, Save, Trash2, RefreshCw, Sun, Contrast, Palette, Sparkles,
-  Volume2, Loader2, AlertCircle, CheckCircle2, Radio,
+  Volume2, Loader2, AlertCircle, CheckCircle2, Radio, Bot,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -20,6 +20,7 @@ import {
   useImageSettings, useUpdateImageSettings,
   useAudioSettings, useUpdateAudioSettings,
 } from "@/hooks/use-onvif";
+import { useCamera, useUpdateCamera, useAiModels } from "@/hooks/use-cameras";
 
 interface CameraControlPanelProps {
   cameraId: number;
@@ -398,6 +399,91 @@ function AudioSettingsPanel({ cameraId }: { cameraId: number }) {
   );
 }
 
+/* ── AI Model settings ─────────────────────────────────────────────────── */
+function AiSettingsPanel({ cameraId }: { cameraId: number }) {
+  const { toast } = useToast();
+  const { data: camera, isLoading } = useCamera(cameraId);
+  const { data: modelsData, isLoading: modelsLoading } = useAiModels();
+  const update = useUpdateCamera();
+
+  const options = modelsData?.models ?? [];
+  const currentModel = camera?.ai_model ?? "yolov8n.pt";
+
+  const handleModelChange = (value: string) => {
+    update.mutate(
+      { camera_id: cameraId, ai_model: value },
+      {
+        onSuccess: () => toast({ title: `AI model set to ${value}` }),
+        onError: (e: any) =>
+          toast({ title: "Failed to update AI model", description: e.message, variant: "destructive" }),
+      },
+    );
+  };
+
+  const handleThresholdCommit = (value: number) => {
+    update.mutate({ camera_id: cameraId, ai_confidence_threshold: value });
+  };
+
+  if (isLoading) return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground mx-auto" />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <Bot className="h-3.5 w-3.5" /> Detection Enabled
+        </Label>
+        <Switch
+          checked={camera?.ai_detection_enabled ?? true}
+          onCheckedChange={(v) => update.mutate({ camera_id: cameraId, ai_detection_enabled: v })}
+        />
+      </div>
+
+      <div>
+        <Label className="text-xs text-muted-foreground mb-1 block">AI Model</Label>
+        <Select value={currentModel} onValueChange={handleModelChange} disabled={modelsLoading || update.isPending}>
+          <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {options.map((m) => (
+              <SelectItem key={m.value} value={m.value} className="text-xs">
+                {m.label}
+              </SelectItem>
+            ))}
+            {/* Fall back to showing the raw value if it isn't in the curated list */}
+            {currentModel && !options.some((m) => m.value === currentModel) && (
+              <SelectItem value={currentModel} className="text-xs">{currentModel}</SelectItem>
+            )}
+          </SelectContent>
+        </Select>
+        {options.find((m) => m.value === currentModel)?.note && (
+          <p className="text-[10px] text-muted-foreground mt-1">
+            {options.find((m) => m.value === currentModel)?.note}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <Label className="text-xs text-muted-foreground">Confidence Threshold</Label>
+          <span className="text-xs font-mono text-foreground">
+            {(camera?.ai_confidence_threshold ?? 0.35).toFixed(2)}
+          </span>
+        </div>
+        <Slider
+          value={[camera?.ai_confidence_threshold ?? 0.35]}
+          min={0.1} max={0.9} step={0.05}
+          onValueChange={() => {}}
+          onValueCommit={([v]) => handleThresholdCommit(v)}
+        />
+      </div>
+
+      <p className="text-[10px] text-muted-foreground">
+        Changing the model takes effect on this camera's next detection request
+        — the sidecar loads and caches each model the first time it's used.
+      </p>
+    </div>
+  );
+}
+
 /* ── Main exported panel ──────────────────────────────────────────────── */
 export function CameraControlPanel({ cameraId, cameraName, ptzSupported }: CameraControlPanelProps) {
   const { data: caps, isLoading: capsLoading, isError: capsError } = useOnvifCapabilities(cameraId);
@@ -423,11 +509,12 @@ export function CameraControlPanel({ cameraId, cameraName, ptzSupported }: Camer
       </div>
 
       <Tabs defaultValue="streams" className="w-full">
-        <TabsList className="grid w-full grid-cols-4 h-8">
+        <TabsList className="grid w-full grid-cols-5 h-8">
           <TabsTrigger value="streams" className="text-xs">Streams</TabsTrigger>
           <TabsTrigger value="ptz" className="text-xs" disabled={!hasPtz}>PTZ</TabsTrigger>
           <TabsTrigger value="image" className="text-xs" disabled={!hasImaging}>Image</TabsTrigger>
           <TabsTrigger value="audio" className="text-xs" disabled={!hasAudio}>Audio</TabsTrigger>
+          <TabsTrigger value="ai" className="text-xs">AI</TabsTrigger>
         </TabsList>
 
         <TabsContent value="streams" className="mt-3">
@@ -455,6 +542,10 @@ export function CameraControlPanel({ cameraId, cameraName, ptzSupported }: Camer
 
         <TabsContent value="audio" className="mt-3">
           <AudioSettingsPanel cameraId={cameraId} />
+        </TabsContent>
+
+        <TabsContent value="ai" className="mt-3">
+          <AiSettingsPanel cameraId={cameraId} />
         </TabsContent>
       </Tabs>
     </div>

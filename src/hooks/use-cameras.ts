@@ -10,6 +10,8 @@ export interface Camera {
   manufacturer: string | null; model: string | null;
   hls_playlist_url: string | null; hls_output_dir: string | null; rec_output_dir: string | null;
   added_at: string; updated_at: string;
+  // Per-camera AI configuration (server/migrations/002_ai_model_config.sql)
+  ai_model: string; ai_confidence_threshold: number; ai_detection_enabled: boolean;
   // from health join
   is_online: number | null; is_recording: number | null;
   frame_rate_actual: number | null; bitrate_kbps: number | null; last_error: string | null;
@@ -59,5 +61,17 @@ export function useDeleteCamera() {
   return useMutation({
     mutationFn: (camera_id: number) => apiDelete(`/api/cameras/${camera_id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["cameras"] }),
+  });
+}
+
+// ── AI model options (server/src/routes/ai.js -> GET /api/ai/models) ───────
+export interface AiModelOption { value: string; label: string; note?: string; }
+interface AiModelsResponse { models: AiModelOption[]; loaded_models: string[]; device: string | null; }
+
+export function useAiModels() {
+  return useQuery<AiModelsResponse>({
+    queryKey: ["ai-models"],
+    queryFn: () => apiGet<AiModelsResponse>("/api/ai/models"),
+    staleTime: 5 * 60 * 1000,
   });
 }
