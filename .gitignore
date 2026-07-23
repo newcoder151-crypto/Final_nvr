@@ -44,7 +44,6 @@ server/storage/hls/
 *.avi
 *.mkv
 *.mov
-*.ts
 *.m3u8
 
 # =========================
@@ -131,3 +130,4 @@ env/
 ENV/
 **/.venv/
 **/venv/
+
