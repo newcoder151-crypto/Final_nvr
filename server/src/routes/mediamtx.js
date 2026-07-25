@@ -9,9 +9,22 @@ const { authenticate } = require("../middleware/auth");
 
 const router = express.Router();
 const MTX_API = process.env.MEDIAMTX_API || "http://localhost:9997";
-const MTX_WEB = process.env.MEDIAMTX_WEB || "http://localhost:8889";
-const MTX_HLS = process.env.MEDIAMTX_HLS || "http://localhost:8888";
 const MTX_RTSP = process.env.MEDIAMTX_RTSP || "localhost:8554";
+// MEDIAMTX_WEB/MEDIAMTX_HLS default to null (not "localhost") so we can
+// tell "explicitly configured" apart from "not set". When not set, we
+// derive the host per-request from req.hostname below — whatever host the
+// browser used to reach this API is also the host MediaMTX is reachable
+// on (same box). Hardcoding "localhost" here meant every WebRTC/HLS URL
+// silently pointed at the *viewer's own machine* whenever the dashboard
+// on this same box). Hardcoding "localhost" here meant every WebRTC/HLS
+// URL silently pointed at the *viewer's own machine* whenever the
+// dashboard was opened from anywhere other than the NVR box itself — the
+// live path would exist and be healthy in MediaMTX, but nothing would
+// ever load in the browser, with no error surfaced anywhere obvious.
+const MTX_WEB_ENV = process.env.MEDIAMTX_WEB || null;
+const MTX_HLS_ENV = process.env.MEDIAMTX_HLS || null;
+function mtxWebFor(req) { return MTX_WEB_ENV || `${req.protocol}://${req.hostname}:8889`; }
+function mtxHlsFor(req) { return MTX_HLS_ENV || `${req.protocol}://${req.hostname}:8888`; }
 
 // GET /api/mediamtx/streams  — list all active MediaMTX paths
 router.get("/streams", authenticate, async (req, res) => {
@@ -54,8 +67,8 @@ router.get("/cameras", authenticate, async (req, res) => {
         mediamtx: {
           path_name: pathName,
           is_live: isLive,
-          webrtc_url: `${MTX_WEB}/${pathName}/whep`, // WHEP for browser WebRTC
-          hls_url: `${MTX_HLS}/${pathName}/index.m3u8`,
+          webrtc_url: `${mtxWebFor(req)}/${pathName}/whep`, // WHEP for browser WebRTC
+          hls_url: `${mtxHlsFor(req)}/${pathName}/index.m3u8`,
           rtsp_url: `rtsp://${MTX_RTSP}/${pathName}`,
         },
       };
@@ -83,8 +96,8 @@ router.get("/status", authenticate, async (req, res) => {
     res.json({
       online: !!paths,
       active_paths: (paths?.items || []).length,
-      webrtc_url: MTX_WEB,
-      hls_url: MTX_HLS,
+      webrtc_url: mtxWebFor(req),
+      hls_url: mtxHlsFor(req),
       rtsp_url: `rtsp://${MTX_RTSP}`,
       api_url: MTX_API,
     });

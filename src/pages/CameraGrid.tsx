@@ -45,12 +45,18 @@ import { useToast } from "@/hooks/use-toast";
 import { apiGet, detectObjects, type Detection } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
 
+// These are only used as a fallback if the backend's own per-request URLs
+// (cam.mediamtx.webrtc_url / hls_url, see server/src/routes/mediamtx.js)
+// aren't available yet. Deriving from window.location.hostname — the host
+// the browser actually used to load this page — instead of hardcoding
+// "localhost" means this still works when the dashboard is viewed from any
+// machine other than the NVR box itself, which "localhost" never would.
 const MTX_WEB =
   (import.meta.env.VITE_MEDIAMTX_WEB as string | undefined) ??
-  "http://localhost:8889";
+  `${window.location.protocol}//${window.location.hostname}:8889`;
 const MTX_HLS =
   (import.meta.env.VITE_MEDIAMTX_HLS as string | undefined) ??
-  "http://localhost:8888";
+  `${window.location.protocol}//${window.location.hostname}:8888`;
 
 const LAYOUTS = [
   { key: "1x1", label: "1×1", cols: 1, perPage: 1, icon: Square },

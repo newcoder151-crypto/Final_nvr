@@ -209,9 +209,15 @@ HLS_PATH=/storage/hls
 PORT=3001
 NODE_ENV=development
 MEDIAMTX_API=http://localhost:9997
-MEDIAMTX_WEB=http://localhost:8889
-MEDIAMTX_HLS=http://localhost:8888
 MEDIAMTX_RTSP=localhost:8554
+# MEDIAMTX_WEB / MEDIAMTX_HLS intentionally NOT set here. These are the
+# browser-facing WebRTC/HLS URLs — hardcoding them to localhost meant they
+# silently pointed at the *viewer's own machine* whenever the dashboard was
+# opened from anywhere other than this box itself, even though MediaMTX
+# itself was fine. server/src/routes/mediamtx.js now derives the correct
+# host per-request from the incoming request when these are unset. Only
+# set them explicitly if you're running behind a reverse proxy / fixed
+# domain where per-request derivation would get it wrong.
 ENVEOF
 fi
 set -a; source "$ENV_FILE"; set +a
@@ -219,18 +225,15 @@ set -a; source "$ENV_FILE"; set +a
 # Ensure MediaMTX vars exist in env file (add if missing)
 grep -q "MEDIAMTX_API" "$ENV_FILE" || cat >> "$ENV_FILE" << 'ADDENV'
 MEDIAMTX_API=http://localhost:9997
-MEDIAMTX_WEB=http://localhost:8889
-MEDIAMTX_HLS=http://localhost:8888
 MEDIAMTX_RTSP=localhost:8554
 ADDENV
 
 [[ ! -f "$ROOT/.env" ]] && echo "VITE_API_URL=http://localhost:${PORT:-3001}" > "$ROOT/.env"
 
-# Add MediaMTX URLs to frontend env
-{
-  grep -q "VITE_MEDIAMTX_WEB" "$ROOT/.env" || echo "VITE_MEDIAMTX_WEB=http://localhost:8889"
-  grep -q "VITE_MEDIAMTX_HLS" "$ROOT/.env" || echo "VITE_MEDIAMTX_HLS=http://localhost:8888"
-} 2>/dev/null || true
+# VITE_MEDIAMTX_WEB / VITE_MEDIAMTX_HLS intentionally NOT written here —
+# same reasoning as MEDIAMTX_WEB/HLS above. src/pages/CameraGrid.tsx falls
+# back to window.location.hostname when these are unset at build time,
+# which is correct regardless of which machine views the dashboard from.
 
 ok "Environment loaded — API :${PORT:-3001}"
 

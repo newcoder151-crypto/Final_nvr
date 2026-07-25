@@ -3,17 +3,30 @@
 mediamtx-sync.py — Syncs camera RTSP URLs from PostgreSQL → MediaMTX API.
 
 How it works:
-  1. Reads ACTIVE cameras from the DB (rtsp_url, username, password_hash, camera_id)
-  2. For each camera, creates a MediaMTX path  cam_<camera_id>
-     that pulls the RTSP stream via UDP
-  3. Removes paths for cameras that are deleted/inactive
-  4. Re-runs every SYNC_INTERVAL_SECS to pick up new cameras automatically
-  5. Handles reconnects: if a path's source drops, MediaMTX retries every 2s
+  1. Reads ACTIVE cameras from the DB (rec_rtsp_url — the profile proven
+     reliable across this fleet — plus credentials from
+     cameras_config_details, same join stream_manager.py uses)
+  2. For each camera, creates a MediaMTX path cam_<camera_id>_raw that
+     pulls directly from the camera over TCP, using MediaMTX's own
+     mature RTSP client and reconnect logic. This is the ONLY thing that
+     ever opens an RTSP connection to a physical camera — this fleet's
+     firmware appears to cap concurrent RTSP sessions per camera, and
+     letting multiple independent home-grown ffmpeg processes each open
+     their own connection caused unpredictable "one purpose connects,
+     the other gets refused" failures. One real connection, managed by
+     the tool actually built for that job, removes that entirely.
+  3. stream_manager.py then reads ONLY these local cam_<id>_raw paths
+     (never the camera directly) to burn in the watermark and produce
+     the final cam_<id> path (live view) and the recorded segments.
+  4. Removes paths for cameras that are deleted/inactive
+  5. Re-runs every SYNC_INTERVAL_SECS to pick up new cameras automatically
 
-Path naming: cam_<camera_id>
-  WebRTC URL:  http://localhost:8889/cam_<id>/whep   (browser)
-  RTSP URL:    rtsp://localhost:8554/cam_<id>          (VLC / ffplay)
-  HLS URL:     http://localhost:8888/cam_<id>/index.m3u8
+Path naming:
+  cam_<id>_raw  — local-only, MediaMTX pulling straight from the camera
+  cam_<id>      — final, watermarked, what the frontend/WebRTC/HLS use
+    WebRTC URL:  http://localhost:8889/cam_<id>/whep   (browser)
+    RTSP URL:    rtsp://localhost:8554/cam_<id>          (VLC / ffplay)
+    HLS URL:     http://localhost:8888/cam_<id>/index.m3u8
 """
 import os, sys, time, logging, requests, psycopg2, psycopg2.extras
 from urllib.parse import urlparse, urlunparse
@@ -51,30 +64,6 @@ def get_db():
             time.sleep(5)
     raise RuntimeError("Cannot connect to PostgreSQL")
 
-def fetch_active_cameras(conn):
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute("""
-            SELECT camera_id, camera_name, rtsp_url, username, password_hash, ip_address
-            FROM cameras
-            WHERE status = 'ACTIVE'
-              AND rtsp_url IS NOT NULL
-              AND rtsp_url != ''
-            ORDER BY camera_id
-        """)
-        return cur.fetchall()
-
-# ── RTSP URL with embedded credentials ────────────────────────────────────────
-def build_rtsp_url(rtsp_url: str, user: str | None, passwd: str | None) -> str:
-    if not user or not passwd:
-        return rtsp_url
-    p = urlparse(rtsp_url)
-    if p.username:          # already has creds
-        return rtsp_url
-    netloc = f"{user}:{passwd}@{p.hostname}"
-    if p.port:
-        netloc += f":{p.port}"
-    return urlunparse(p._replace(netloc=netloc))
-
 # ── MediaMTX API ───────────────────────────────────────────────────────────────
 def mtx_get(path: str) -> dict | None:
     try:
@@ -87,7 +76,7 @@ def mtx_get(path: str) -> dict | None:
 def mtx_add_path(path_name: str, rtsp_url: str) -> bool:
     """Create or update a MediaMTX path that pulls from an RTSP source."""
     payload = {
-        "sourceProtocol": "udp",
+        "sourceProtocol": "tcp",
         "source": rtsp_url,
         "sourceOnDemand": False,
         "maxReaders": 64,
@@ -151,71 +140,76 @@ def wait_for_mediamtx():
         time.sleep(2)
     log.error("MediaMTX API not responding after 240s — continuing anyway")
 
-def wait_for_relay(host: str, port: str):
-    """Block until mnvrd's RTSP relay is actually accepting TCP connections.
 
-    start.sh launches MediaMTX/this script (step 7) before mnvrd (step 9),
-    so without this wait, MediaMTX would immediately try to pull from the
-    relay before it exists — logging a harmless-but-confusing burst of
-    "connection refused" on every single restart. Waiting here means paths
-    only ever get added once there's actually something to pull from,
-    regardless of script step ordering.
-    """
-    import socket
-    log.info(f"Waiting for mnvrd's RTSP relay at {host}:{port} ...")
-    for i in range(120):
-        try:
-            with socket.create_connection((host, int(port)), timeout=2):
-                log.info("✓ RTSP relay ready")
-                return
-        except Exception:
-            pass
-        if i % 6 == 0 and i > 0:
-            log.info(f"  ...still waiting for relay ({i*2}s) — is mnvrd still starting up?")
-        time.sleep(2)
-    log.warning(f"Relay at {host}:{port} not reachable after 240s — "
-                "continuing anyway (mnvrd may have failed to start; check logs/nvr.log)")
+def build_rtsp_url_with_creds(rtsp_url: str, user: str | None, passwd: str | None) -> str:
+    """Same percent-encoding approach as stream_manager.py's build_authed_url
+    — never raw string concatenation, that's what caused the credential-
+    doubling bug for passwords containing '@' fixed earlier in this project."""
+    if not user or not passwd:
+        return rtsp_url
+    from urllib.parse import quote
+    p = urlparse(rtsp_url)
+    if p.username:
+        return rtsp_url
+    netloc = f"{quote(user, safe='')}:{quote(passwd, safe='')}@{p.hostname}"
+    if p.port:
+        netloc += f":{p.port}"
+    return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
 
-# RTSP relay hosted by mnvrd itself (see nvr_core/src/modules/rtsp_relay).
-# Pointing MediaMTX here instead of at the camera directly means mnvrd is
-# the ONLY thing that ever opens an RTSP session to the physical camera —
-# many cameras only accept 1-2 concurrent RTSP clients, and having both
-# MediaMTX and mnvrd connect independently caused them to race for that
-# slot (one camera's live view would work while its recording failed, and
-# vice versa, unpredictably). This also means the live view now shows the
-# same watermark (date/time + GPS/speed) that recordings do, since it's
-# the same watermarked stream either way.
-RTSP_RELAY_HOST = os.environ.get("RTSP_RELAY_HOST", "127.0.0.1")
-RTSP_RELAY_PORT = os.environ.get("RTSP_RELAY_PORT", "8555")
+
+def fetch_active_cameras_full(conn):
+    """Like fetch_active_cameras() but also pulls rec_rtsp_url and the
+    cameras_config_details-joined credentials — same query shape as
+    stream_manager.py's fetch_active_cameras(), kept in sync deliberately."""
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""
+            SELECT c.camera_id, c.camera_name, c.rtsp_url, c.rec_rtsp_url,
+                   COALESCE(cd.rtsp_username, c.username) AS rtsp_username,
+                   cd.rtsp_password
+            FROM cameras c
+            LEFT JOIN cameras_config_details cd
+                   ON host(cd.ip_address) = c.ip_address
+            WHERE c.status = 'ACTIVE'
+              AND c.rtsp_url IS NOT NULL AND c.rtsp_url != ''
+            ORDER BY c.camera_id
+        """)
+        return cur.fetchall()
+
 
 # ── Main sync loop ─────────────────────────────────────────────────────────────
 def sync_once(conn):
-    cameras = fetch_active_cameras(conn)
+    cameras = fetch_active_cameras_full(conn)
 
-    # DISABLED: no longer adding "source"-based paths here. ffmpeg
-    # (stream_manager.py) now pushes each camera's LIVE profile directly
-    # into MediaMTX as an RTSP publisher — MediaMTX auto-creates a path on
-    # first publish when no explicit source is configured for it, and
-    # rejects a publisher for any path that DOES have one, which is why
-    # this had to be turned off rather than left pointing at the old
-    # relay (that relay is gone; ffmpeg replaced it — see
-    # stream_manager.py's module docstring for the full picture).
-    #
-    # wanted: dict[str, str] = {}
-    # for cam in cameras:
-    #     path_name = f"{PATH_PREFIX}{cam['camera_id']}"
-    #     rtsp = f"rtsp://{RTSP_RELAY_HOST}:{RTSP_RELAY_PORT}/{path_name}"
-    #     wanted[path_name] = rtsp
-    # existing = mtx_list_paths()
-    # for path_name, rtsp_url in wanted.items():
-    #     mtx_add_path(path_name, rtsp_url)
-    # for path_name in existing - set(wanted.keys()):
-    #     mtx_remove_path(path_name)
+    # MediaMTX pulls directly from each camera's reliable profile
+    # (rec_rtsp_url — proven reliable across this fleet in extensive
+    # testing) into a "_raw" path, using MediaMTX's OWN mature RTSP client
+    # and reconnect logic rather than a hand-rolled one. stream_manager.py
+    # then only ever touches these local, already-stable paths — it never
+    # opens its own connection to a physical camera at all anymore. This
+    # is also why only ONE thing (MediaMTX) ever opens an RTSP session to
+    # a given camera, avoiding the concurrent-session contention some of
+    # this fleet's firmware appears to enforce (previously, having
+    # multiple independent ffmpeg processes each connect to the same
+    # camera caused "one purpose connects fine, the other gets refused"
+    # unpredictably).
+    wanted: dict[str, str] = {}
+    for cam in cameras:
+        path_name = f"{PATH_PREFIX}{cam['camera_id']}_raw"
+        url = build_rtsp_url_with_creds(
+            cam["rec_rtsp_url"] or cam["rtsp_url"],
+            cam["rtsp_username"], cam["rtsp_password"])
+        wanted[path_name] = url
+
+    existing = mtx_list_paths()
+    existing_raw = {p for p in existing if p.endswith("_raw")}
+    for path_name, rtsp_url in wanted.items():
+        mtx_add_path(path_name, rtsp_url)
+    for path_name in existing_raw - set(wanted.keys()):
+        mtx_remove_path(path_name)
 
     if cameras:
-        log.info(f"Sync: {len(cameras)} active camera(s) in DB "
-                 f"(paths now managed by ffmpeg publishers, not this script)")
-
+        log.info(f"Sync: {len(cameras)} active camera(s) — "
+                 f"{len(wanted)} raw source path(s) managed in MediaMTX")
     else:
         log.warning("No active cameras with RTSP URLs found in DB")
 
@@ -228,8 +222,6 @@ def main():
     log.info("=" * 60)
 
     wait_for_mediamtx()
-    # wait_for_relay() removed — no relay to wait for anymore; ffmpeg
-    # (stream_manager.py) pushes directly, MediaMTX just needs to be up.
 
     conn = get_db()
     log.info("✓ Connected to PostgreSQL")

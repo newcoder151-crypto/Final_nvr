@@ -1,33 +1,70 @@
 #!/usr/bin/env python3
 """
-stream_manager.py — ffmpeg-based live view + recording, one thread per
-camera per purpose ("dual stream" — LIVE profile pushed to MediaMTX,
-REC profile recorded to disk).
+stream_manager.py — ffmpeg-based live view + recording, working from a
+camera feed that MediaMTX itself pulls (never from the camera directly).
 
 WHY THIS EXISTS (context for future maintainers):
-Today's extensive testing (packet captures, side-by-side comparisons)
-proved that GStreamer's rtspsrc has real reliability problems against
-this specific camera fleet — inconsistent SETUP failures, and in one
-proven case (packet-captured) a camera that accepted PLAY with 200 OK
-and then sent zero RTP data. ffmpeg's RTSP client, tested side by side
-against the exact same URLs and credentials, worked cleanly every single
-time. Rather than keep fighting rtspsrc, this replaces mnvrd's own
-camera connections with ffmpeg subprocesses.
+Testing (packet captures, side-by-side comparisons) proved that
+GStreamer's rtspsrc has real reliability problems against this specific
+camera fleet — inconsistent SETUP failures, and in one proven case
+(packet-captured) a camera that accepted PLAY with 200 OK and then sent
+zero RTP data. ffmpeg's RTSP client, tested side by side against the
+exact same URLs and credentials, worked cleanly every single time.
+Rather than keep fighting rtspsrc, this replaces mnvrd's own camera
+connections with ffmpeg subprocesses — but see the architecture history
+below for how "which process actually talks to the camera" evolved.
 
-ARCHITECTURE:
-  - LIVE profile  -> ffmpeg -c copy -f rtsp  -> pushed directly into
-    MediaMTX as an RTSP publisher (MediaMTX already accepts publishers;
-    this replaces the custom GstRTSPServer relay in rtsp_relay.c, which
-    is no longer needed). No re-encode, lowest latency/CPU, but no
-    burned-in watermark on live view (trade-off — recordings keep it).
-  - REC profile   -> ffmpeg with a drawtext watermark (date/time; GPS/
-    speed placeholder until hardware exists) -> segmented MP4 files
-    written directly to rec_output_dir, flat, camera-id-prefixed.
+ARCHITECTURE (2 stages per camera, this process — plus MediaMTX itself):
+  0. MediaMTX pulls directly from each camera (mediamtx-sync.py adds a
+     cam_<id>_raw path per camera via MediaMTX's own API, source =
+     rec_rtsp_url — the profile proven reliable across this fleet). This
+     is the ONLY thing that ever opens an RTSP connection to a physical
+     camera, using MediaMTX's own mature, purpose-built RTSP client and
+     reconnect logic rather than anything hand-rolled in this file.
+  1. WATERMARK (run_watermark): reads cam_<id>_raw — a local, already-
+     stable MediaMTX path, never the camera itself — burns in the
+     date/time watermark (GPS/speed placeholder until hardware exists)
+     once, encodes once, republishes to cam_<id>: the path the
+     frontend's WebRTC/HLS players actually watch.
+  2. REC RELAY (run_rec_relay): reads cam_<id> — the SAME final
+     watermarked path LIVE viewers see — and writes segmented MP4 files
+     via a plain -c copy (no second encode needed). Fully independent
+     process from run_watermark(); each only depends on MediaMTX being
+     up, not on the other still running, so one failing doesn't touch
+     the other. Reading the same path LIVE uses (rather than a separate
+     raw feed) also guarantees recordings and live view show identical
+     content, watermark included.
 
-Each camera gets two supervisor threads (one per purpose), each running
-its own restart-with-backoff loop around an ffmpeg subprocess — matching
-the same 5s/10s/20s/30s-cap backoff pattern used elsewhere in this
-project, so a struggling camera doesn't get hammered with reconnects.
+ARCHITECTURE HISTORY (why it took several tries to land here):
+  - v1: two totally separate ffmpeg processes, each opening its OWN
+    connection to the camera (LIVE from rtsp_url via -c copy with no
+    watermark, REC from rec_rtsp_url via transcode with one). This
+    fleet's firmware appears to cap concurrent RTSP sessions per camera,
+    so these two connections regularly fought over that budget — the
+    repeated "REC connects fine, LIVE gets Connection refused" pattern.
+  - v2: merged into ONE ffmpeg process reading the camera once and
+    fanning out to two encoded outputs directly. Fixed the connection
+    contention, but ffmpeg opens every output's header during startup
+    before processing any frames — so a transient failure on the LIVE-
+    publish side made the WHOLE process fail to start, taking a
+    perfectly fine recording down with it too.
+  - v3: split into ingest (the one real camera connection, done by THIS
+    script) + two independent local relays. Fixed the fault-isolation
+    problem, but the ingest process was still a hand-rolled ffmpeg
+    subprocess doing the actual camera reconnect logic — which is
+    exactly the kind of thing that kept surfacing new edge cases
+    (dump_extra's own H.264 parser crashing one relay, 404s from
+    relays starting before ingest had published, etc).
+  - v4 (this version): stopped hand-rolling the camera connection
+    entirely and let MediaMTX do it — that's what it's actually built
+    and tested for. This script now only ever touches already-stable
+    local MediaMTX paths, never a physical camera.
+
+Each stage gets its own supervisor thread running a restart-with-backoff
+loop around its ffmpeg subprocess — matching the same 5s/10s/20s/30s-cap
+backoff pattern used elsewhere in this project — plus a separate
+recording-indexer thread (see index_recordings() below). That's 3
+threads per camera now (watermark, rec-relay, indexer).
 
 mnvrd itself should have native_streaming_enabled=false in mnvr.conf
 when this is running, so its own streamer_module.c/recorder.c don't
@@ -50,6 +87,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 import psycopg2.extras
+import requests
 
 # ── Config (env-overridable, same pattern as mediamtx-sync.py) ─────────────
 DB_HOST     = os.environ.get("DB_HOST", "localhost")
@@ -60,6 +98,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "mnvr")
 
 MEDIAMTX_RTSP_HOST = os.environ.get("MEDIAMTX_RTSP_HOST", "127.0.0.1")
 MEDIAMTX_RTSP_PORT = os.environ.get("MEDIAMTX_RTSP_PORT", "8554")
+MEDIAMTX_API = os.environ.get("MEDIAMTX_API", "http://localhost:9997")
 
 RECORDINGS_BASE = os.environ.get("RECORDINGS_PATH", "/storage/recordings")
 SEGMENT_SECONDS = int(os.environ.get("SEGMENT_SECONDS", "120"))
@@ -100,39 +139,20 @@ def get_db():
 
 
 def fetch_active_cameras(conn):
-    """Returns cameras with credentials properly separated (never embedded
-    in the URL — matches the fix applied in main.c/config_module.c for the
-    same reason: embedding a password containing '@' corrupts the URL)."""
+    """Only camera_id/name/rec_output_dir are needed here now — this
+    process never connects to a physical camera itself anymore (see the
+    module docstring), so it has no need for RTSP URLs or credentials at
+    all. Those live in mediamtx-sync.py, which is the thing that actually
+    talks to cameras now."""
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute("""
-            SELECT c.camera_id, c.camera_name, c.rtsp_url, c.rec_rtsp_url,
-                   c.rec_output_dir,
-                   COALESCE(cd.rtsp_username, c.username) AS rtsp_username,
-                   cd.rtsp_password
-            FROM cameras c
-            LEFT JOIN cameras_config_details cd
-                   ON host(cd.ip_address) = c.ip_address
-            WHERE c.status = 'ACTIVE'
-              AND c.rtsp_url IS NOT NULL AND c.rtsp_url != ''
-            ORDER BY c.camera_id
+            SELECT camera_id, camera_name, rec_output_dir
+            FROM cameras
+            WHERE status = 'ACTIVE'
+              AND rtsp_url IS NOT NULL AND rtsp_url != ''
+            ORDER BY camera_id
         """)
         return cur.fetchall()
-
-
-def build_authed_url(raw_url: str, user: str | None, passwd: str | None) -> str:
-    """Insert credentials via urlparse/urlunparse (correct percent-encoding),
-    never raw string concatenation — that's exactly the bug that caused the
-    credential-doubling issue fixed earlier today in main.c."""
-    if not user or not passwd:
-        return raw_url
-    from urllib.parse import urlparse, urlunparse, quote
-    p = urlparse(raw_url)
-    if p.username:  # already has credentials embedded
-        return raw_url
-    netloc = f"{quote(user, safe='')}:{quote(passwd, safe='')}@{p.hostname}"
-    if p.port:
-        netloc += f":{p.port}"
-    return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
 
 
 # ── Backoff (matches the 5s/10s/20s/30s-cap pattern used in the C code) ────
@@ -140,141 +160,155 @@ def backoff_seconds(retry_count: int) -> int:
     return min(5 * (2 ** min(retry_count, 3)), 30)
 
 
-# ── Live view: ffmpeg -c copy, pushed straight into MediaMTX as publisher ──
-def run_live(camera_id: int, camera_name: str, url: str):
+# ── Shared supervisor loop: restart-with-backoff around one ffmpeg cmd ─────
+# ── Live status tracking, for report_health() below ─────────────────────────
+# Nothing else in this project writes to camera_health anymore. mnvrd used
+# to (via POST /api/cameras/:id/health), but it's disabled — see the
+# module docstring. Without this, the table just sits there with stale or
+# empty data forever, and the frontend's online/recording badges (which
+# read the latest camera_health row via GET /api/cameras) end up
+# completely disconnected from whether ffmpeg/MediaMTX are actually
+# streaming — a camera can be recording live footage right now and still
+# show "offline" in the UI, because nothing ever told the DB otherwise.
+_status_lock = threading.Lock()
+_camera_status: dict[int, dict[str, bool]] = {}
+
+
+def _set_stage_alive(camera_id: int, stage_key: str, alive: bool):
+    with _status_lock:
+        _camera_status.setdefault(camera_id, {})[stage_key] = alive
+
+
+# ── Shared supervisor loop: restart-with-backoff around one ffmpeg cmd ─────
+def _run_supervised(camera_name: str, stage: str, cmd: list[str],
+                     camera_id: int | None = None, stage_key: str | None = None):
+    """Runs `cmd` in a restart-with-backoff loop until shutdown. Shared by
+    both stages (watermark/rec-relay) so each is a genuinely independent
+    process/thread — one stage crashing or backing off never blocks or
+    kills the other, unlike having them share one ffmpeg invocation (see
+    the module docstring's "v2" note for why that mattered).
+
+    If camera_id/stage_key are given, also updates _camera_status so
+    report_health() can tell the DB (and therefore the UI) what's
+    actually running right now, instead of the UI reading stale data."""
+    retry_count = 0
+    while not _shutdown.is_set():
+        log.info(f"[{camera_name}] {stage} starting")
+        start = time.monotonic()
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, text=True)
+            marked_alive = False
+            while proc.poll() is None:
+                if _shutdown.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    if camera_id is not None and stage_key:
+                        _set_stage_alive(camera_id, stage_key, False)
+                    return
+                # Only mark "alive" once it's survived a few seconds —
+                # avoids a crash-loop briefly flashing "online" every retry.
+                if not marked_alive and time.monotonic() - start > 3:
+                    if camera_id is not None and stage_key:
+                        _set_stage_alive(camera_id, stage_key, True)
+                    marked_alive = True
+                time.sleep(1)
+            if camera_id is not None and stage_key:
+                _set_stage_alive(camera_id, stage_key, False)
+            stderr_tail = ""
+            if proc.stderr:
+                stderr_tail = proc.stderr.read()[-400:]
+            elapsed = time.monotonic() - start
+            log.warning(f"[{camera_name}] {stage} exited (code={proc.returncode}, "
+                        f"ran {elapsed:.0f}s) {stderr_tail.strip()!r}")
+        except FileNotFoundError:
+            log.error(f"ffmpeg not found on PATH — cannot start {stage}")
+            return
+        except Exception as e:
+            log.error(f"[{camera_name}] {stage} error: {e}")
+            elapsed = 0
+
+        retry_count = 0 if elapsed >= 15 else retry_count + 1
+        delay = backoff_seconds(retry_count)
+        log.info(f"[{camera_name}] {stage} retrying in {delay}s")
+        _shutdown.wait(delay)
+
+
+# Date/time watermark (top-left), applied once at ingest so REC and LIVE
+# always match automatically instead of needing to be kept in sync by
+# hand. Deliberately using ffmpeg's default %{localtime} expansion rather
+# than a custom strftime format string — a custom format requires colons
+# to be escaped through three separate layers (shell, ffmpeg arg parsing,
+# drawtext's own filter-option parser), which is fragile and, when tested,
+# produced a "%{localtime} requires at most 1 arguments" warning even
+# after escaping. The default format is a perfectly readable
+# "YYYY-MM-DD HH:MM:SS" already. GPS/speed intentionally omitted here
+# until real hardware exists — add a second drawtext with a file-based
+# text source once a GPS reader is available, e.g.:
+#   drawtext=textfile=/run/mnvr/gps_overlay.txt:reload=1:...
+WATERMARK = (
+    "drawtext=text='%{localtime}'"
+    ":fontcolor=white:fontsize=22:box=1:boxcolor=black@0.5:boxborderw=4"
+    ":x=10:y=10"
+)
+
+
+# ── Stage 1: watermark — reads MediaMTX's own camera pull, republishes live ─
+def run_watermark(camera_id: int, camera_name: str):
+    """Reads cam_<id>_raw — a path MediaMTX itself pulls directly from the
+    camera (see mediamtx-sync.py; that's now the ONLY thing that ever
+    opens an RTSP connection to the physical camera). Burns in the
+    watermark, encodes once, republishes to cam_<id> — the path the
+    frontend's WebRTC/HLS players actually watch.
+
+    This process never touches the camera itself, only MediaMTX's own
+    local, already-stable pull of it — so camera flakiness becomes
+    MediaMTX's problem to reconnect through (which it's built and tested
+    for), not this process's."""
+    src = f"rtsp://{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/cam_{camera_id}_raw"
     target = f"rtsp://{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/cam_{camera_id}"
-    retry_count = 0
-    while not _shutdown.is_set():
-        # -rtsp_transport is per-URL: the occurrence before -i only governs
-        # reading from the camera. Without repeating it as an output option
-        # (after -i, before the target URL), ffmpeg's RTSP muxer falls back
-        # to its default lower transport (UDP) when publishing into
-        # MediaMTX — exactly the reliability problem this project already
-        # moved away from on the camera-facing side. Repeating it here makes
-        # camera -> ffmpeg -> MediaMTX TCP end-to-end, which is what
-        # actually gets MediaMTX's live source (and therefore both the
-        # WebRTC and HLS outputs the frontend consumes) to come up reliably.
-        # -analyzeduration/-probesize: without these, ffmpeg sometimes opens
-        # the RTSP publish to MediaMTX before it has captured a full SPS/PPS
-        # from the camera (sent once near connection start, not on every
-        # frame). That race produces an SDP with incomplete codec parameters,
-        # which MediaMTX rejects with "400 Bad Request" on ANNOUNCE — seen
-        # intermittently on some cameras/connection attempts and not others,
-        # even with identical H.264 settings, because it depends on exactly
-        # when the SPS/PPS lands relative to ffmpeg's default (short) probe
-        # window. Forcing a longer probe makes ffmpeg wait for it reliably.
-        cmd = [
-            "ffmpeg", "-nostdin", "-loglevel", "warning",
-            "-rtsp_transport", "tcp",
-            "-analyzeduration", "10M",
-            "-probesize", "10M",
-            "-i", url,
-            "-c", "copy",
-            "-f", "rtsp",
-            "-rtsp_transport", "tcp",
-            target,
-        ]
-        log.info(f"[{camera_name}] LIVE starting -> {target}")
-        start = time.monotonic()
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.PIPE, text=True)
-            while proc.poll() is None:
-                if _shutdown.is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    return
-                time.sleep(1)
-            stderr_tail = ""
-            if proc.stderr:
-                stderr_tail = proc.stderr.read()[-400:]
-            elapsed = time.monotonic() - start
-            log.warning(f"[{camera_name}] LIVE exited (code={proc.returncode}, "
-                        f"ran {elapsed:.0f}s) {stderr_tail.strip()!r}")
-        except FileNotFoundError:
-            log.error("ffmpeg not found on PATH — cannot start LIVE stream")
-            return
-        except Exception as e:
-            log.error(f"[{camera_name}] LIVE error: {e}")
-            elapsed = 0
-
-        retry_count = 0 if elapsed >= 15 else retry_count + 1
-        delay = backoff_seconds(retry_count)
-        log.info(f"[{camera_name}] LIVE retrying in {delay}s")
-        _shutdown.wait(delay)
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "warning",
+        "-rtsp_transport", "tcp",
+        "-analyzeduration", "10M",
+        "-probesize", "10M",
+        "-i", src,
+        "-vf", WATERMARK,
+        "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2048k",
+        "-c:a", "aac", "-b:a", "64k",
+        "-bsf:v", "dump_extra=freq=keyframe",
+        "-f", "rtsp", "-rtsp_transport", "tcp",
+        target,
+    ]
+    _run_supervised(camera_name, "WATERMARK", cmd, camera_id, "watermark")
 
 
-# ── Recording: ffmpeg with drawtext watermark, segmented MP4 to disk ───────
-def run_record(camera_id: int, camera_name: str, url: str, output_dir: str):
+# ── Stage 2: REC relay — reads the final watermarked path, segments to disk ─
+def run_rec_relay(camera_id: int, camera_name: str, output_dir: str):
+    """Reads cam_<id> — the SAME final watermarked path the frontend
+    watches live — and writes segmented MP4 files. Plain -c copy, no
+    re-encode needed. Reading the same path LIVE viewers see (rather than
+    the raw pre-watermark feed) guarantees recordings and live view are
+    provably showing identical content, and this process is fully
+    independent from run_watermark(): if one dies, the other is
+    unaffected, since neither depends on the other still running — both
+    only depend on MediaMTX, which is already up either way."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    # Flat, camera-id-prefixed filenames directly in output_dir — matches
-    # the existing "no subfolders" convention already established today.
     pattern = os.path.join(output_dir, f"cam_{camera_id}_%Y%m%d_%H%M%S.mp4")
-
-    # Date/time watermark (top-left). Deliberately using ffmpeg's default
-    # %{localtime} expansion rather than a custom strftime format string —
-    # a custom format requires colons to be escaped through three separate
-    # layers (shell, ffmpeg arg parsing, drawtext's own filter-option
-    # parser), which is fragile and, when tested, produced a
-    # "%{localtime} requires at most 1 arguments" warning even after
-    # escaping. The default format is a perfectly readable
-    # "YYYY-MM-DD HH:MM:SS" already. GPS/speed intentionally omitted here
-    # until real hardware exists — add a second drawtext with a
-    # file-based text source once a GPS reader is available, e.g.:
-    #   drawtext=textfile=/run/mnvr/gps_overlay.txt:reload=1:...
-    watermark = (
-        "drawtext=text='%{localtime}'"
-        ":fontcolor=white:fontsize=22:box=1:boxcolor=black@0.5:boxborderw=4"
-        ":x=10:y=10"
-    )
-
-    retry_count = 0
-    while not _shutdown.is_set():
-        cmd = [
-            "ffmpeg", "-nostdin", "-loglevel", "warning",
-            "-rtsp_transport", "tcp",
-            "-i", url,
-            "-vf", watermark,
-            "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2048k",
-            "-c:a", "aac", "-b:a", "64k",
-            "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
-            "-segment_format", "mp4", "-reset_timestamps", "1", "-strftime", "1",
-            pattern,
-        ]
-        log.info(f"[{camera_name}] REC starting -> {pattern}")
-        start = time.monotonic()
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.PIPE, text=True)
-            while proc.poll() is None:
-                if _shutdown.is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    return
-                time.sleep(1)
-            stderr_tail = ""
-            if proc.stderr:
-                stderr_tail = proc.stderr.read()[-400:]
-            elapsed = time.monotonic() - start
-            log.warning(f"[{camera_name}] REC exited (code={proc.returncode}, "
-                        f"ran {elapsed:.0f}s) {stderr_tail.strip()!r}")
-        except FileNotFoundError:
-            log.error("ffmpeg not found on PATH — cannot start recording")
-            return
-        except Exception as e:
-            log.error(f"[{camera_name}] REC error: {e}")
-            elapsed = 0
-
-        retry_count = 0 if elapsed >= 15 else retry_count + 1
-        delay = backoff_seconds(retry_count)
-        log.info(f"[{camera_name}] REC retrying in {delay}s")
-        _shutdown.wait(delay)
+    src = f"rtsp://{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/cam_{camera_id}"
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "warning",
+        "-rtsp_transport", "tcp",
+        "-i", src,
+        "-c", "copy",
+        "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
+        "-segment_format", "mp4", "-reset_timestamps", "1", "-strftime", "1",
+        pattern,
+    ]
+    _run_supervised(camera_name, "REC-RELAY", cmd, camera_id, "rec")
 
 
 # ── Recording indexer ───────────────────────────────────────────────────────
@@ -394,6 +428,63 @@ def index_recordings(camera_id: int, camera_name: str, output_dir: str):
         _shutdown.wait(poll_interval)
 
 
+# ── Health reporting: tell the DB (and therefore the UI) what's real ───────
+def _path_ready(path_name: str) -> bool:
+    """Ground truth for is_online: does MediaMTX currently have an active,
+    ready source for cam_<id>_raw? This comes from MediaMTX itself (which
+    is the only thing that actually talks to the camera now — see the
+    module docstring), not from anything this script assumes."""
+    try:
+        r = requests.get(f"{MEDIAMTX_API}/v3/paths/get/{path_name}", timeout=3)
+        if r.ok:
+            return bool(r.json().get("ready"))
+    except Exception:
+        pass
+    return False
+
+
+def report_health(all_camera_ids_fn):
+    """Periodically writes a real camera_health row per active camera.
+
+    This is the fix for the actual root cause behind cameras showing
+    "offline" in the UI while genuinely streaming: nothing has written to
+    camera_health since mnvrd (which used to, via
+    POST /api/cameras/:id/health) was disabled. GET /api/cameras joins
+    the LATEST camera_health row to populate is_online/is_recording for
+    the frontend — with nobody writing new rows, that join was returning
+    stale-or-empty data forever, completely disconnected from whether
+    ffmpeg/MediaMTX were actually streaming. Writing directly to Postgres
+    here (same approach as index_recordings() above) avoids needing an
+    API auth token inside this script.
+    """
+    conn = get_db()
+    while not _shutdown.is_set():
+        try:
+            for cid in all_camera_ids_fn():
+                is_online = _path_ready(f"cam_{cid}_raw")
+                with _status_lock:
+                    is_recording = bool(_camera_status.get(cid, {}).get("rec"))
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO camera_health
+                               (camera_id, is_online, is_recording, error_count)
+                               VALUES (%s, %s, %s, 0)""",
+                            (cid, int(is_online), int(is_recording)))
+                    conn.commit()
+                except Exception as e:
+                    log.warning(f"health report failed for camera {cid}: {e}")
+                    conn.rollback()
+        except Exception as e:
+            log.warning(f"report_health error ({e}), reconnecting to DB...")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = get_db()
+        _shutdown.wait(10)
+
+
 # ── Main: one LIVE + one REC thread per camera, refreshed from the DB ──────
 def main():
     log.info("=" * 60)
@@ -408,6 +499,11 @@ def main():
 
     conn = get_db()
     log.info("Connected to PostgreSQL")
+
+    t_health = threading.Thread(target=report_health, args=(lambda: set(started_cameras),),
+                                 name="health-reporter", daemon=True)
+    t_health.start()
+    threads.append(t_health)
 
     while not _shutdown.is_set():
         try:
@@ -426,24 +522,21 @@ def main():
             if cid in started_cameras:
                 continue
             name = cam["camera_name"]
-            live_url = build_authed_url(cam["rtsp_url"], cam["rtsp_username"], cam["rtsp_password"])
-            rec_url = build_authed_url(
-                cam["rec_rtsp_url"] or cam["rtsp_url"],
-                cam["rtsp_username"], cam["rtsp_password"])
             out_dir = cam["rec_output_dir"] or RECORDINGS_BASE
 
-            t_live = threading.Thread(target=run_live, args=(cid, name, live_url),
-                                       name=f"live-{cid}", daemon=True)
-            t_rec = threading.Thread(target=run_record, args=(cid, name, rec_url, out_dir),
+            t_watermark = threading.Thread(target=run_watermark, args=(cid, name),
+                                            name=f"watermark-{cid}", daemon=True)
+            t_rec = threading.Thread(target=run_rec_relay, args=(cid, name, out_dir),
                                       name=f"rec-{cid}", daemon=True)
             t_idx = threading.Thread(target=index_recordings, args=(cid, name, out_dir),
                                       name=f"idx-{cid}", daemon=True)
-            t_live.start()
+            t_watermark.start()
             t_rec.start()
             t_idx.start()
-            threads.extend([t_live, t_rec, t_idx])
+            threads.extend([t_watermark, t_rec, t_idx])
             started_cameras.add(cid)
-            log.info(f"[{name}] Started LIVE + REC + recording-indexer threads (camera_id={cid})")
+            log.info(f"[{name}] Started WATERMARK + REC-RELAY + "
+                     f"recording-indexer threads (camera_id={cid})")
 
         _shutdown.wait(CAMERA_REFRESH_INTERVAL)
 
