@@ -1,0 +1,9 @@
+ camera_id | camera_name | status |   ip_address   |                                         rtsp_url                                         |                                       rec_rtsp_url                                       | rtsp_username | has_password 
+-----------+-------------+--------+----------------+------------------------------------------------------------------------------------------+------------------------------------------------------------------------------------------+---------------+--------------
+        31 | Cam         | ACTIVE | 172.210.140.81 | rtsp://172.210.140.81:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1 | rtsp://172.210.140.81:554/Streaming/Channels/102?transportmode=unicast&profile=Profile_2 | admin         | t
+        39 | Cam         | ACTIVE | 172.210.140.89 | rtsp://172.210.140.89:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1 | rtsp://172.210.140.89:554/Streaming/Channels/102?transportmode=unicast&profile=Profile_2 | admin         | t
+        36 | Cam         | ACTIVE | 172.210.140.86 | rtsp://172.210.140.86:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1 | rtsp://172.210.140.86:554/Streaming/Channels/102?transportmode=unicast&profile=Profile_2 | admin         | t
+        35 | Cam         | ACTIVE | 172.210.140.85 | rtsp://172.210.140.85:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1 | rtsp://172.210.140.85:554/Streaming/Channels/102?transportmode=unicast&profile=Profile_2 | admin         | t
+        34 | Cam         | ACTIVE | 172.210.140.84 | rtsp://172.210.140.84:554/Streaming/Channels/101?transportmode=unicast&profile=Profile_1 | rtsp://172.210.140.84:554/Streaming/Channels/102?transportmode=unicast&profile=Profile_2 | admin         | t
+(5 rows)
+

@@ -301,7 +301,7 @@ function CameraTile({ cam, compact, onExpand }: TileProps) {
       <div className="absolute top-1.5 left-1.5 flex gap-1">
         {connState === "connected" && (
           <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/80 text-white font-medium">
-            LIVE {mode.toUpperCase()}
+            LIVE
           </span>
         )}
         {cam.is_recording === 1 && (

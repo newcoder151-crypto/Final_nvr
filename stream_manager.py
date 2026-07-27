@@ -277,8 +277,24 @@ def run_watermark(camera_id: int, camera_name: str):
         "-probesize", "10M",
         "-i", src,
         "-vf", WATERMARK,
+        # -bf 0 + baseline profile: MediaMTX's WebRTC (WHEP) closes the
+        # session outright ("WebRTC doesn't support H264 streams with
+        # B-frames") for any H264 stream containing B-frames. libx264's
+        # "veryfast" preset emits B-frames by default, which is invisible
+        # for recording (MP4/-c copy tolerates B-frames fine) but silently
+        # breaks the WHEP path that live view depends on — exactly the
+        # "REC works, LIVE doesn't" split reported. -pix_fmt yuv420p is
+        # also required: WebRTC/browsers only decode 4:2:0.
         "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2048k",
-        "-c:a", "aac", "-b:a", "64k",
+        "-profile:v", "baseline", "-bf", "0", "-pix_fmt", "yuv420p",
+        "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
+        "-force_key_frames", "expr:gte(t,n_forced*2)",
+        # Opus, not AAC: MediaMTX's WebRTC only supports Opus/G711/LPCM
+        # for audio and drops any other audio codec from the WHEP output
+        # (silently, no error) — AAC would still show video over WebRTC
+        # but live view would always be muted. Opus keeps audio in BOTH
+        # live (WebRTC) and recordings (still muxes into MP4 fine).
+        "-c:a", "libopus", "-b:a", "64k", "-async", "50",
         "-bsf:v", "dump_extra=freq=keyframe",
         "-f", "rtsp", "-rtsp_transport", "tcp",
         target,

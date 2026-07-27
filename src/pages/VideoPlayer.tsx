@@ -1700,6 +1700,33 @@ const VideoPlayer = () => {
 
   // Playback state
   const [playing, setPlaying] = useState(false);
+  // Mirrors `playing` without being a dependency of the load-recording
+  // effect below — lets that effect know "was already playing" at the
+  // moment a new recording is selected, without re-running itself every
+  // time playing flips from onPlay/onPause events.
+  const playingRef = useRef(false);
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+
+  // Waits for the browser's own "I actually have a frame ready" signal
+  // (loadeddata) before calling play(). Calling play() right after
+  // load()/a src change leaves .paused=false (so the button correctly
+  // shows "playing") but with no decoded frame yet — visually frozen
+  // until enough data arrives, which is exactly the "button says
+  // playing/doesn't play, click again and now it plays" symptom. Every
+  // call site that loads a new recording and wants it to (keep) playing
+  // should go through this instead of an arbitrary setTimeout + play().
+  const playWhenReady = (video: HTMLVideoElement, onReady?: () => void) => {
+    const start = () => {
+      onReady?.();
+      video.play().catch(() => {
+        // Autoplay blocked or src not ready — stay paused, onPause already reflects that.
+      });
+    };
+    if (video.readyState >= 2) start(); // HAVE_CURRENT_DATA or beyond
+    else video.addEventListener("loadeddata", start, { once: true });
+  };
   const [muted, setMuted] = useState(true);
   const [curTime, setCurTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -1787,10 +1814,17 @@ const VideoPlayer = () => {
     if (!selectedRecId) return;
     const video = videoRef.current;
     if (!video) return;
+    const wasPlaying = playingRef.current;
     video.src = getStreamUrl(selectedRecId);
     video.load();
-    // setPlaying is driven purely by onPlay/onPause events on the video element.
-    // Reset time UI but don't touch playing state here.
+    // setPlaying itself is still driven purely by onPlay/onPause/onPlaying/
+    // onWaiting events on the <video> tag (single source of truth). But if
+    // a recording was already playing when a new one was picked (Timeline
+    // click or sidebar list click), carry that intent forward instead of
+    // silently going paused — and wait for real data before calling
+    // play(), so the button never shows "playing" while the picture is
+    // still frozen.
+    if (wasPlaying) playWhenReady(video);
     setCurTime(0);
     setDuration(0);
     setFrameCount(0);
@@ -1839,17 +1873,24 @@ const VideoPlayer = () => {
     });
 
     if (hit) {
+      const isNewRec = hit.recording_id !== selectedRecId;
       setSelectedRecId(hit.recording_id);
       // Seek to offset within that recording
       const recStart = new Date(hit.start_timestamp).getTime();
       const offsetSecs = (clickTs - recStart) / 1000;
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.currentTime = offsetSecs;
-          // play() → onPlay event → setPlaying(true)
-          videoRef.current.play().catch(() => {});
+      const video = videoRef.current;
+      if (video) {
+        if (isNewRec) {
+          // New recording: the "Load recording" effect above hasn't run
+          // yet (state update is async), so wait a tick for src/load() to
+          // actually happen, then wait for real data before seeking+playing.
+          setTimeout(() => playWhenReady(video, () => { video.currentTime = offsetSecs; }), 0);
+        } else {
+          // Same recording, just scrubbing the timeline — seek immediately.
+          video.currentTime = offsetSecs;
+          video.play().catch(() => {});
         }
-      }, 400); // small delay for video to load
+      }
     } else {
       setPlayheadSec(secFromMidnight);
       toast({
@@ -1878,12 +1919,10 @@ const VideoPlayer = () => {
       setSelectedRecId(hit.recording_id);
       const recStart = new Date(hit.start_timestamp).getTime();
       const offsetSecs = (evTs - recStart) / 1000;
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.currentTime = offsetSecs;
-          videoRef.current.play().catch(() => {});
-        }
-      }, 400);
+      const video = videoRef.current;
+      if (video) {
+        setTimeout(() => playWhenReady(video, () => { video.currentTime = offsetSecs; }), 0);
+      }
       toast({ title: ev.title || ev.event_type, description: "Jumped to event in recording" });
     } else {
       const evDate = startOfDay(new Date(ev.occurred_at));
