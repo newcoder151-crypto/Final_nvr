@@ -5,7 +5,7 @@
 const express = require("express");
 const axios = require("axios");
 const { query } = require("../db");
-const { authenticate } = require("../middleware/auth");
+const { authenticate, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
 const MTX_API = process.env.MEDIAMTX_API || "http://localhost:9997";
@@ -32,21 +32,20 @@ router.get("/streams", authenticate, async (req, res) => {
     const r = await axios.get(`${MTX_API}/v3/paths/list`, { timeout: 4000 });
     res.json(r.data);
   } catch (err) {
-    res
-      .status(503)
-      .json({
-        error: "MediaMTX not reachable",
-        detail: err.message,
-        hint: "Run: bash start.sh",
-      });
+    console.error('[mediamtx:streams]', err.message);
+    res.status(503).json({ error: "MediaMTX not reachable" });
   }
 });
 
 // GET /api/mediamtx/cameras  — cameras with their MediaMTX URLs
 router.get("/cameras", authenticate, async (req, res) => {
   try {
+    // OWASP A02: rtsp_url frequently embeds the camera's RTSP credentials
+    // (rtsp://user:pass@host/...). It must never be sent to the browser —
+    // the client only needs the WebRTC/HLS URLs constructed below, which
+    // carry no credential.
     const rows = await query(
-      `SELECT camera_id, camera_name, camera_type, ip_address, rtsp_url, status, location_description
+      `SELECT camera_id, camera_name, camera_type, ip_address, status, location_description
        FROM cameras WHERE status='ACTIVE' ORDER BY camera_id`,
     );
 
@@ -69,14 +68,16 @@ router.get("/cameras", authenticate, async (req, res) => {
           is_live: isLive,
           webrtc_url: `${mtxWebFor(req)}/${pathName}/whep`, // WHEP for browser WebRTC
           hls_url: `${mtxHlsFor(req)}/${pathName}/index.m3u8`,
-          rtsp_url: `rtsp://${MTX_RTSP}/${pathName}`,
+          // rtsp_url intentionally omitted — it is only used internally
+          // between the recorder/mnvrd and MediaMTX, never by the browser.
         },
       };
     });
 
     res.json({ cameras, mediamtx_api: MTX_API });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[mediamtx:cameras]', err);
+    res.status(500).json({ error: 'Failed to load camera streams' });
   }
 });
 
@@ -102,12 +103,13 @@ router.get("/status", authenticate, async (req, res) => {
       api_url: MTX_API,
     });
   } catch (err) {
-    res.status(503).json({ online: false, error: err.message });
+    console.error('[mediamtx:status]', err.message);
+    res.status(503).json({ online: false });
   }
 });
 
 // POST /api/mediamtx/sync  — trigger immediate sync (no wait for interval)
-router.post("/sync", authenticate, async (req, res) => {
+router.post("/sync", authenticate, requireRole('ADMIN', 'OPERATOR'), async (req, res) => {
   try {
     // The sync service picks up DB changes automatically every 15s.
     // This endpoint kicks a manual trigger by notifying the sync process.
@@ -116,7 +118,8 @@ router.post("/sync", authenticate, async (req, res) => {
         "Sync runs every 15s automatically. Changes will appear shortly.",
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[mediamtx:sync]', err);
+    res.status(500).json({ error: 'Sync failed' });
   }
 });
 

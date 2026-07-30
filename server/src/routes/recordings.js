@@ -7,7 +7,12 @@ const router = express.Router();
 // GET /api/recordings
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { camera_id, start_date, end_date, status, limit = 50, offset = 0 } = req.query;
+    const { camera_id, start_date, end_date, status } = req.query;
+    let limit = parseInt(req.query.limit, 10);
+    let offset = parseInt(req.query.offset, 10);
+    if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+    if (limit > 500) limit = 500;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
     const conds = [], params = [];
     if (camera_id)  { params.push(parseInt(camera_id)); conds.push(`r.camera_id=$${params.length}`); }
     if (start_date) { params.push(start_date); conds.push(`r.start_timestamp>=$${params.length}`); }
@@ -15,7 +20,7 @@ router.get('/', authenticate, async (req, res) => {
     if (status)     { params.push(status.toUpperCase()); conds.push(`r.status=$${params.length}`); }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
     const total = parseInt((await query(`SELECT COUNT(*) FROM recordings r ${where}`, params)).rows[0].count);
-    params.push(parseInt(limit), parseInt(offset));
+    params.push(limit, offset);
     const rows = await query(
       `SELECT r.recording_id, r.camera_id, r.file_path, r.file_name,
               r.file_size_bytes, r.duration_seconds, r.start_timestamp, r.end_timestamp,
@@ -29,8 +34,8 @@ router.get('/', authenticate, async (req, res) => {
        ORDER BY r.start_timestamp DESC
        LIMIT $${params.length-1} OFFSET $${params.length}`,
       params);
-    res.json({ recordings: rows.rows, total, limit: parseInt(limit), offset: parseInt(offset) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ recordings: rows.rows, total, limit, offset });
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // GET /api/recordings/:id
@@ -42,11 +47,11 @@ router.get('/:id', authenticate, async (req, res) => {
        WHERE r.recording_id=$1`, [req.params.id]);
     if (!rec) return res.status(404).json({ error: 'Recording not found' });
     res.json(rec);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // POST /api/recordings  — called by recorder service
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, requireRole('ADMIN', 'OPERATOR'), async (req, res) => {
   try {
     const {
       camera_id, file_path, file_name, start_timestamp, end_timestamp,
@@ -81,7 +86,7 @@ router.post('/', authenticate, async (req, res) => {
        gps_speed_kmh || null, gps_altitude || null, gps_heading || null, status]);
 
     res.status(201).json(rec);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/recordings/:id
@@ -98,7 +103,7 @@ router.put('/:id', authenticate, requireRole('ADMIN', 'OPERATOR'), async (req, r
       `UPDATE recordings SET ${fields.join(',')} WHERE recording_id=$${params.length} RETURNING *`, params);
     if (!rec) return res.status(404).json({ error: 'Not found' });
     res.json(rec);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // DELETE /api/recordings/:id
@@ -110,7 +115,7 @@ router.delete('/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
     if (req.query.deleteFile === 'true' && rec.file_path && fs.existsSync(rec.file_path))
       fs.unlinkSync(rec.file_path);
     res.json({ message: 'Deleted' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 module.exports = router;

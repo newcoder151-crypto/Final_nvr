@@ -30,7 +30,7 @@ router.get('/status', authenticate, async (req, res) => {
       health: health || null,
       storage: storage.rows,
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // GET /api/config/dashboard — alias used by frontend useDashboardStats
@@ -52,7 +52,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       recentAlerts: events.rows.filter(e => e.is_acknowledged === 0).slice(0, 5),
       cameras: cameras.rows,
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // GET /api/config
@@ -60,7 +60,7 @@ router.get('/', authenticate, async (req, res) => {
   try {
     const rows = await query(`SELECT * FROM system_config ORDER BY config_key`);
     res.json({ config: rows.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // GET /api/config/:key
@@ -69,7 +69,7 @@ router.get('/:key', authenticate, async (req, res) => {
     const row = await queryOne(`SELECT * FROM system_config WHERE config_key=$1`, [req.params.key]);
     if (!row) return res.status(404).json({ error: 'Config key not found' });
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/config/:key
@@ -85,7 +85,7 @@ router.put('/:key', authenticate, requireRole('ADMIN'), async (req, res) => {
       [config_value, req.user.username, req.params.key]);
     if (!row) return res.status(404).json({ error: 'Config key not found' });
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 module.exports = router;

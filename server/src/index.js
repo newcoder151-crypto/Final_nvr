@@ -1,13 +1,18 @@
 require("dotenv").config();
+// Fail fast on missing/weak secrets before anything else touches them.
+const { isProduction } = require("./config/security");
+
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const rateLimit = require("express-rate-limit");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const { setupWebSocket } = require("./websocket");
 const { testConnection } = require("./db");
+const { authenticate, requireRole } = require("./middleware/auth");
 const swaggerUi = require("swagger-ui-express");
 
 const app = express();
@@ -15,19 +20,81 @@ const server = http.createServer(app);
 const PORT = parseInt(process.env.PORT || "3001");
 const STORAGE_PATH = process.env.STORAGE_PATH || "/storage";
 
-// ── Middleware ────────────────────────────────────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+// Trust exactly one reverse-proxy hop (nginx) so req.ip / express-rate-limit
+// key on the real client IP instead of the proxy's, without blindly
+// trusting an arbitrary chain of X-Forwarded-For values.
+app.set("trust proxy", process.env.TRUST_PROXY_HOPS ? parseInt(process.env.TRUST_PROXY_HOPS) : 1);
+
+// ── Security headers (OWASP A05: Security Misconfiguration) ───────────────────
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        mediaSrc: ["'self'", "blob:"],
+        connectSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+      },
+    },
+    hsts: { maxAge: 31536000, includeSubDomains: true, preload: false },
+    referrerPolicy: { policy: "no-referrer" },
+  }),
+);
+
+// ── CORS (OWASP A05) ────────────────────────────────────────────────────────
+// A wildcard origin ("*") combined with credentials:true is both rejected by
+// browsers and, if it weren't, would let ANY site read authenticated
+// responses. Require an explicit allow-list in production; fall back to the
+// Vite dev server origin only outside production.
+const configuredOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+if (isProduction && configuredOrigins.length === 0) {
+  throw new Error(
+    "[SECURITY] CORS_ORIGIN must be set to an explicit comma-separated list of allowed origins in production.",
+  );
+}
+const allowedOrigins = configuredOrigins.length
+  ? configuredOrigins
+  : ["http://localhost:8080", "http://127.0.0.1:8080"];
+
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || "*",
+    origin(origin, cb) {
+      // Allow same-origin / non-browser tools (no Origin header) and any
+      // explicitly allow-listed origin; reject everything else.
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 600,
   }),
 );
-app.use(morgan("dev"));
+
+app.use(morgan(isProduction ? "combined" : "dev"));
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// ── Global rate limiting (OWASP A04 — resource-consumption abuse) ─────────────
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: parseInt(process.env.API_RATE_LIMIT || "300"),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, slow down" },
+  }),
+);
 
 // ── Storage dirs ──────────────────────────────────────────────────────────────
 const recPath = path.join(STORAGE_PATH, "recordings");
@@ -52,39 +119,43 @@ app.use("/api/onvif", require("./routes/onvif"));
 app.use("/api/mediamtx", require("./routes/mediamtx"));
 
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get("/api/health", (req, res) =>
-  res.json({
-    status: "ok",
-    version: "2.0.0",
-    service: "railway-nvr-api",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  }),
-);
+// Deliberately minimal — no version/uptime/internal detail for unauthenticated
+// callers (OWASP A05: avoid unnecessary information disclosure).
+app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 
-// ── Swagger ───────────────────────────────────────────────────────────────────
+// ── Swagger (OWASP A05) ─────────────────────────────────────────────────────
+// API documentation reveals the entire attack surface (routes, params,
+// schemas). Never expose it unauthenticated in production.
 try {
   const swaggerDoc = require("./swagger");
+  const docsGate = isProduction ? [authenticate, requireRole("ADMIN")] : [];
   app.use(
     "/api/docs",
+    ...docsGate,
     swaggerUi.serve,
     swaggerUi.setup(swaggerDoc, {
       customSiteTitle: "Railway NVR API",
       swaggerOptions: { persistAuthorization: true },
     }),
   );
-  app.get("/api/docs.json", (req, res) => res.json(swaggerDoc));
+  app.get("/api/docs.json", ...docsGate, (req, res) => res.json(swaggerDoc));
 } catch (e) {
   console.warn("[swagger] Could not load swagger doc:", e.message);
 }
 
-// ── 404 / Error ───────────────────────────────────────────────────────────────
-app.use((req, res) =>
-  res.status(404).json({ error: "Not found", path: req.path }),
-);
+// ── 404 ───────────────────────────────────────────────────────────────────────
+app.use((req, res) => res.status(404).json({ error: "Not found" }));
+
+// ── Error handler (OWASP A09: no internal detail leaked to clients) ───────────
 app.use((err, req, res, _next) => {
-  console.error("[ERROR]", err.message);
-  res.status(err.status || 500).json({ error: err.message });
+  console.error("[ERROR]", err.stack || err.message);
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({ error: "Origin not allowed" });
+  }
+  const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
+  res.status(status).json({
+    error: isProduction && status === 500 ? "Internal server error" : err.message,
+  });
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────

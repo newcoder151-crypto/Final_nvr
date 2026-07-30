@@ -279,7 +279,8 @@ router.post('/', authenticate, async (req, res) => {
 
     res.json(results);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[route-error]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -328,7 +329,8 @@ router.get('/suggestions', authenticate, async (req, res) => {
     suggestions.push(...presets.slice(0, 6));
     res.json({ suggestions: suggestions.slice(0, 12) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[route-error]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

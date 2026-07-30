@@ -1,13 +1,18 @@
 const express = require('express');
 const { query, queryOne } = require('../db');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireRole } = require('../middleware/auth');
 const { broadcast } = require('../websocket');
 const router = express.Router();
 
 // GET /api/events
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { camera_id, severity, event_type, acknowledged, start_date, end_date, limit = 100, offset = 0 } = req.query;
+    const { camera_id, severity, event_type, acknowledged, start_date, end_date } = req.query;
+    let limit = parseInt(req.query.limit, 10);
+    let offset = parseInt(req.query.offset, 10);
+    if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+    if (limit > 500) limit = 500;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
     const conds = [], params = [];
     if (camera_id)  { params.push(parseInt(camera_id)); conds.push(`e.camera_id=$${params.length}`); }
     if (severity)   { params.push(severity.toUpperCase()); conds.push(`e.severity=$${params.length}`); }
@@ -20,7 +25,7 @@ router.get('/', authenticate, async (req, res) => {
     if (end_date)   { params.push(end_date);   conds.push(`e.occurred_at<=$${params.length}`); }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
     const total = parseInt((await query(`SELECT COUNT(*) FROM events e ${where}`, params)).rows[0].count);
-    params.push(parseInt(limit), parseInt(offset));
+    params.push(limit, offset);
     const rows = await query(
       `SELECT e.event_id, e.event_type, e.severity, e.title, e.description,
               e.camera_id, e.status, e.is_acknowledged, e.acknowledged_by, e.acknowledged_at,
@@ -31,14 +36,14 @@ router.get('/', authenticate, async (req, res) => {
        LEFT JOIN cameras c ON e.camera_id=c.camera_id
        ${where} ORDER BY e.occurred_at DESC
        LIMIT $${params.length-1} OFFSET $${params.length}`, params);
-    res.json({ events: rows.rows, total, limit: parseInt(limit), offset: parseInt(offset) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ events: rows.rows, total, limit, offset });
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // ── IMPORTANT: Static routes BEFORE /:id to prevent "batch" being parsed as an ID ──
 
 // PUT /api/events/all/acknowledge
-router.put('/all/acknowledge', authenticate, async (req, res) => {
+router.put('/all/acknowledge', authenticate, requireRole('ADMIN','OPERATOR'), async (req, res) => {
   try {
     const result = await query(
       `UPDATE events SET is_acknowledged=1, acknowledged_by=$1, acknowledged_at=NOW(),
@@ -47,11 +52,11 @@ router.put('/all/acknowledge', authenticate, async (req, res) => {
       [req.user.username]);
     broadcast({ type: 'events.batch_acknowledged', data: { count: result.rowCount } });
     res.json({ acknowledged: result.rowCount });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/events/batch/acknowledge
-router.put('/batch/acknowledge', authenticate, async (req, res) => {
+router.put('/batch/acknowledge', authenticate, requireRole('ADMIN','OPERATOR'), async (req, res) => {
   try {
     const { event_ids } = req.body;
     if (!Array.isArray(event_ids) || !event_ids.length)
@@ -64,11 +69,11 @@ router.put('/batch/acknowledge', authenticate, async (req, res) => {
       [req.user.username, ...event_ids]);
     broadcast({ type: 'events.batch_acknowledged', data: { count: result.rowCount } });
     res.json({ acknowledged: result.rowCount });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // POST /api/events
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, requireRole('ADMIN','OPERATOR'), async (req, res) => {
   try {
     const { event_type, title, severity = 'INFO', camera_id, description,
             event_data, snapshot_path, video_clip_path, coach_location,
@@ -84,7 +89,7 @@ router.post('/', authenticate, async (req, res) => {
        gps_latitude || null, gps_longitude || null]);
     broadcast({ type: 'event.new', data: event });
     res.status(201).json(event);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // ── /:id routes AFTER static routes ──────────────────────────────────────────
@@ -100,11 +105,11 @@ router.get('/:id', authenticate, async (req, res) => {
       [eventId]);
     if (!event) return res.status(404).json({ error: 'Event not found' });
     res.json(event);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/events/:id/acknowledge  — single event
-router.put('/:id/acknowledge', authenticate, async (req, res) => {
+router.put('/:id/acknowledge', authenticate, requireRole('ADMIN','OPERATOR'), async (req, res) => {
   try {
     const eventId = parseInt(req.params.id);
     if (isNaN(eventId)) return res.status(400).json({ error: 'Invalid event ID' });
@@ -116,7 +121,7 @@ router.put('/:id/acknowledge', authenticate, async (req, res) => {
     if (!event) return res.status(404).json({ error: 'Event not found' });
     broadcast({ type: 'event.acknowledged', data: event });
     res.json(event);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 module.exports = router;

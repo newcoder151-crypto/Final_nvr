@@ -1,22 +1,35 @@
 require('dotenv').config();
 const { Pool } = require('pg');
+const { DB_PASSWORD } = require('./config/security');
 
+// OWASP A02 / A05: no hardcoded credential fallback for the database — the
+// only "default" is an explicit, logged, dev-only empty password (see
+// config/security.js). Production requires DB_PASSWORD to be set.
 const pool = new Pool({
-  host:     process.env.DB_HOST     || 'localhost',
-  port:     parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME     || 'mnvr',
-  user:     process.env.DB_USER     || 'mnvr',
-  password: process.env.DB_PASSWORD || 'mnvrpass',
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME || 'mnvr',
+  user: process.env.DB_USER || 'mnvr',
+  password: DB_PASSWORD,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
+  // Enforce TLS to the database in production (A02: Cryptographic Failures —
+  // credentials and video-surveillance metadata should not cross the wire
+  // in plaintext). Set DB_SSL=true and provide a CA if your Postgres
+  // deployment terminates TLS.
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' } : false,
 });
 
 pool.on('error', (err) => console.error('[DB] Pool error:', err.message));
 
 async function query(text, params) {
-  try { return await pool.query(text, params); }
-  catch (err) {
+  try {
+    return await pool.query(text, params);
+  } catch (err) {
+    // OWASP A09: log full detail server-side only. Route handlers must not
+    // forward err.message (which can include table/column names or SQL
+    // fragments) back to the HTTP client.
     console.error('[DB] Query error:', err.message, '\nSQL:', text.slice(0, 200));
     throw err;
   }

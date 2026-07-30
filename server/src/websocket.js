@@ -1,5 +1,6 @@
 const WebSocket = require("ws");
 const jwt = require("jsonwebtoken");
+const { JWT_SECRET } = require("./config/security");
 
 let wss = null;
 const clients = new Map(); // userId -> Set<ws>
@@ -17,18 +18,19 @@ function setupWebSocket(server) {
     }
 
     try {
-      const decoded = jwt.verify(
-        token,
-        process.env.JWT_SECRET || "change-me-in-production",
-      );
+      const decoded = jwt.verify(token, JWT_SECRET, {
+        algorithms: ["HS256"],
+        issuer: "railway-nvr-api",
+      });
       ws.userId = decoded.sub;
+      ws.role = decoded.role;
       ws.isAlive = true;
 
       // Track client
       if (!clients.has(decoded.sub)) clients.set(decoded.sub, new Set());
       clients.get(decoded.sub).add(ws);
 
-      console.log(`[WS] Client connected: ${decoded.email}`);
+      console.log(`[WS] Client connected: user=${decoded.username || decoded.sub}`);
 
       // Send welcome
       ws.send(
@@ -43,6 +45,12 @@ function setupWebSocket(server) {
       });
 
       ws.on("message", (message) => {
+        // OWASP A04 (Insecure Design): cap inbound message size to prevent a
+        // single client from exhausting memory/CPU with oversized frames.
+        if (message.length > 16 * 1024) {
+          ws.send(JSON.stringify({ type: "error", data: { message: "Message too large" } }));
+          return;
+        }
         try {
           const msg = JSON.parse(message.toString());
           handleClientMessage(ws, msg);
@@ -57,7 +65,7 @@ function setupWebSocket(server) {
       });
 
       ws.on("close", () => {
-        console.log(`[WS] Client disconnected: ${decoded.email}`);
+        console.log(`[WS] Client disconnected: user=${decoded.username || decoded.sub}`);
         const userClients = clients.get(decoded.sub);
         if (userClients) {
           userClients.delete(ws);

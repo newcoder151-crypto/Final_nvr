@@ -23,7 +23,7 @@ router.get('/health', authenticate, async (req, res) => {
   try {
     const row = await queryOne(`SELECT * FROM health_monitor_settings ORDER BY id LIMIT 1`);
     res.json(row || {});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/settings/health
@@ -51,7 +51,7 @@ router.put('/health', authenticate, requireRole('ADMIN'), async (req, res) => {
        cpu_critical_threshold, mem_critical_threshold, disk_critical_threshold, enable_alerts]
     );
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 /* ------------------------------------------------------------------ */
@@ -63,7 +63,7 @@ router.get('/recording', authenticate, async (req, res) => {
   try {
     const row = await queryOne(`SELECT * FROM recording_settings ORDER BY id LIMIT 1`);
     res.json(row || {});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/settings/recording
@@ -90,7 +90,7 @@ router.put('/recording', authenticate, requireRole('ADMIN'), async (req, res) =>
        segment_max_size_mb, max_storage_gb, enable_audio, enable_watermark]
     );
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 /* ------------------------------------------------------------------ */
@@ -102,7 +102,7 @@ router.get('/hls', authenticate, async (req, res) => {
   try {
     const row = await queryOne(`SELECT * FROM hls_settings ORDER BY id LIMIT 1`);
     res.json(row || {});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/settings/hls
@@ -122,7 +122,7 @@ router.put('/hls', authenticate, requireRole('ADMIN'), async (req, res) => {
       [hls_base, hls_segment_sec, hls_window_size, hls_delete_old_segments]
     );
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 /* ------------------------------------------------------------------ */
@@ -134,7 +134,7 @@ router.get('/onvif', authenticate, async (req, res) => {
   try {
     const row = await queryOne(`SELECT * FROM onvif_settings ORDER BY id LIMIT 1`);
     res.json(row || {});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/settings/onvif
@@ -155,7 +155,7 @@ router.put('/onvif', authenticate, requireRole('ADMIN'), async (req, res) => {
       [multicast_ip, multicast_port, discovery_interval_sec, probe_timeout_ms, enable_discovery]
     );
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 /* ------------------------------------------------------------------ */
@@ -175,7 +175,7 @@ router.get('/cameras', authenticate, async (req, res) => {
       ORDER BY camera_slot`);
     // passwords intentionally omitted from list
     res.json(rows.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // GET /api/settings/cameras/:slot
@@ -192,7 +192,7 @@ router.get('/cameras/:slot', authenticate, async (req, res) => {
     );
     if (!row) return res.status(404).json({ error: 'Camera slot not found' });
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // POST /api/settings/cameras — add a camera slot
@@ -233,7 +233,7 @@ router.post('/cameras', authenticate, requireRole('ADMIN'), async (req, res) => 
        rtsp_username, rtsp_password, manufacturer, model, is_active]
     );
     res.status(201).json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // PUT /api/settings/cameras/:slot — update a camera slot
@@ -271,7 +271,7 @@ router.put('/cameras/:slot', authenticate, requireRole('ADMIN'), async (req, res
     );
     if (!row) return res.status(404).json({ error: 'Camera slot not found' });
     res.json(row);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 // DELETE /api/settings/cameras/:slot
@@ -283,7 +283,7 @@ router.delete('/cameras/:slot', authenticate, requireRole('ADMIN'), async (req, 
     );
     if (!row) return res.status(404).json({ error: 'Camera slot not found' });
     res.json({ deleted: true, camera_slot: row.camera_slot });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { console.error('[route-error]', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
 module.exports = router;

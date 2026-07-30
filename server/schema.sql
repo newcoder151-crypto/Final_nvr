@@ -806,10 +806,19 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT chk_user_role CHECK (role IN ('ADMIN', 'OPERATOR', 'MAINTENANCE', 'VIEWER', 'API_CLIENT'))
 );
 
--- Default admin user (password should be changed on first login)
--- Default password: Admin@123 (hashed with bcrypt)
+-- Default admin user (password MUST be changed on first login).
+--
+-- OWASP A07: shipping a fixed, publicly-documented credential in a public
+-- repository is inherently risky — anyone who reads this file knows the
+-- starting password. That risk is mitigated (not eliminated) by
+-- must_change_password=1, which the API now actually enforces: this
+-- account can log in exactly once and is blocked from every other endpoint
+-- until it sets a new password (see middleware/auth.js). For a genuinely
+-- production deployment, prefer generating a random one-time password at
+-- provisioning time instead of using this default at all.
+-- Default password: Admin@123 (bcrypt, cost 12)
 INSERT INTO users (username, password_hash, full_name, role, must_change_password) VALUES
-('admin', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5xdeyKWM6wXu', 'System Administrator', 'ADMIN', 1)
+('admin', '$2a$12$tXn4iBEb.dKN8ohZ0jFGN.KBadieZmlBtwHy.Avy.iMcSftuJupBG', 'System Administrator', 'ADMIN', 1)
 ON CONFLICT (username) DO NOTHING;
 
 -- User sessions for authentication
