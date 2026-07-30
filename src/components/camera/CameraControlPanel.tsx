@@ -486,7 +486,12 @@ function AiSettingsPanel({ cameraId }: { cameraId: number }) {
 
 /* ── Main exported panel ──────────────────────────────────────────────── */
 export function CameraControlPanel({ cameraId, cameraName, ptzSupported }: CameraControlPanelProps) {
-  const { data: caps, isLoading: capsLoading, isError: capsError } = useOnvifCapabilities(cameraId);
+  const { data: caps, isLoading: capsLoading } = useOnvifCapabilities(cameraId);
+  // Real device/stream connectivity (same source the Camera Grid uses), so this
+  // panel doesn't call a camera "Offline" just because the separate ONVIF
+  // control channel failed to answer while the video stream is fine.
+  const { data: camera, isLoading: cameraLoading } = useCamera(cameraId);
+  const isDeviceOnline = !!camera?.is_online;
 
   const hasPtz = caps?.supports_ptz ?? !!ptzSupported;
   const hasImaging = caps?.supports_imaging ?? true;
@@ -499,12 +504,12 @@ export function CameraControlPanel({ cameraId, cameraName, ptzSupported }: Camer
           <Radio className="h-4 w-4 text-primary" />
           <p className="text-sm font-semibold text-foreground">Camera Controls — {cameraName}</p>
         </div>
-        {capsLoading ? (
+        {(capsLoading || cameraLoading) ? (
           <Badge variant="outline" className="text-[10px] gap-1"><Loader2 className="h-3 w-3 animate-spin" />Checking</Badge>
-        ) : capsError ? (
+        ) : !isDeviceOnline ? (
           <Badge variant="destructive" className="text-[10px] gap-1"><AlertCircle className="h-3 w-3" />Offline</Badge>
         ) : (
-          <Badge variant="outline" className="text-[10px] gap-1 text-green-600 border-green-600/30"><CheckCircle2 className="h-3 w-3" />ONVIF Connected</Badge>
+          <Badge variant="outline" className="text-[10px] gap-1 text-green-600 border-green-600/30"><CheckCircle2 className="h-3 w-3" />Online</Badge>
         )}
       </div>
 

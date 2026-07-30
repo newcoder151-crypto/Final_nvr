@@ -330,7 +330,7 @@ function CameraTile({ cam, compact, onExpand }: TileProps) {
       </div>
 
       {/* Bottom info */}
-      {!compact && (
+       {!compact && (
         <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
           <p className="text-xs font-semibold text-white leading-tight truncate">
             {cam.camera_name}
@@ -340,7 +340,7 @@ function CameraTile({ cam, compact, onExpand }: TileProps) {
             <span className="text-[10px] font-mono text-white/60">
               {cam.ip_address || "—"}
             </span>
-            {cam.is_online === 1 ? (
+            {connState === "connected" ? (
               <Wifi className="h-2.5 w-2.5 text-green-400 ml-auto" />
             ) : (
               <WifiOff className="h-2.5 w-2.5 text-white/30 ml-auto" />

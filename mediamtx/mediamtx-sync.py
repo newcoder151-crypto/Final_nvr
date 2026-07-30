@@ -165,7 +165,7 @@ def fetch_active_cameras_full(conn):
         cur.execute("""
             SELECT c.camera_id, c.camera_name, c.rtsp_url, c.rec_rtsp_url,
                    COALESCE(cd.rtsp_username, c.username) AS rtsp_username,
-                   cd.rtsp_password
+                   COALESCE(cd.rtsp_password, c.password_hash) AS rtsp_password
             FROM cameras c
             LEFT JOIN cameras_config_details cd
                    ON host(cd.ip_address) = c.ip_address
